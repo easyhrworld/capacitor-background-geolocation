@@ -1,16 +1,16 @@
-package com.capgo.capacitor_background_geolocation;
+package com.easyhrworld.capacitor_background_geolocation;
 
 import android.app.Notification;
 import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.pm.ServiceInfo;
 import android.content.res.AssetFileDescriptor;
 import android.content.res.AssetManager;
 import android.graphics.Color;
-import android.location.LocationListener;
-import android.location.LocationManager;
+import android.location.Location;
 import android.media.MediaPlayer;
 import android.os.Binder;
 import android.os.Build;
@@ -20,6 +20,12 @@ import android.os.Looper;
 import android.os.PowerManager;
 import androidx.localbroadcastmanager.content.LocalBroadcastManager;
 import com.getcapacitor.Logger;
+import com.google.android.gms.location.FusedLocationProviderClient;
+import com.google.android.gms.location.LocationCallback;
+import com.google.android.gms.location.LocationRequest;
+import com.google.android.gms.location.LocationResult;
+import com.google.android.gms.location.LocationServices;
+import com.google.android.gms.location.Priority;
 
 // A bound and started service that is promoted to a foreground service
 // (showing a persistent notification) when the first background watcher is
@@ -30,55 +36,94 @@ public class BackgroundGeolocationService extends Service {
     private final IBinder binder = new LocalBinder();
 
     private static final double EARTH_RADIUS_M = 6371000;
-
-    // Must be unique for this application.
     private static final int NOTIFICATION_ID = 28351;
+    private static final String PREFS_NAME = "bg_geo_prefs";
+    private static final long MAX_TRACKING_DURATION_MS = 12 * 60 * 60 * 1000L; // 12 hours
 
     private String callbackId;
 
-    private LocationManager client;
-    private LocationListener locationCallback;
+    private FusedLocationProviderClient fusedLocationClient;
+    private LocationCallback fusedLocationCallback;
     private MediaPlayer mediaPlayer;
     private double[][] route;
     private double distanceThreshold;
     private boolean isOffRoute;
 
-    private Handler watchdogHandler = new Handler(Looper.getMainLooper());
-    private Runnable watchdogRunnable;
-    private Runnable restartRunnable;
     private float currentDistanceFilter;
     private PowerManager.WakeLock wakeLock;
+
+    // Headless mode
+    private LocationBuffer locationBuffer;
+    private HeadlessHttpPoster httpPoster;
+    private Handler postHandler;
+    private Runnable postRunnable;
+    private Handler autoStopHandler;
+    private Runnable autoStopRunnable;
+
+    @Override
+    public void onCreate() {
+        super.onCreate();
+        fusedLocationClient = LocationServices.getFusedLocationProviderClient(this);
+        locationBuffer = new LocationBuffer(this);
+        httpPoster = new HeadlessHttpPoster(this);
+    }
+
+    @Override
+    public int onStartCommand(Intent intent, int flags, int startId) {
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        boolean wasTracking = prefs.getBoolean("is_tracking", false);
+
+        if (wasTracking && fusedLocationCallback == null) {
+            // Service restarted by OS (START_STICKY) or boot receiver
+            long trackingStartTime = prefs.getLong("tracking_start_time", 0);
+            long elapsed = System.currentTimeMillis() - trackingStartTime;
+
+            if (elapsed < MAX_TRACKING_DURATION_MS) {
+                Logger.info("Restoring background tracking after restart");
+                restoreAndStartTracking();
+            } else {
+                Logger.info("Tracking exceeded 12-hour limit, stopping service");
+                clearTrackingState();
+                stopSelf();
+            }
+        }
+
+        return START_STICKY;
+    }
 
     @Override
     public IBinder onBind(Intent intent) {
         return binder;
     }
 
-    // Some devices allow a foreground service to outlive the application's main
-    // activity, leading to nasty crashes as reported in issue #59. If we learn
-    // that the application has been killed, all watchers are stopped and the
-    // service is terminated immediately.
+    // When the app unbinds (e.g. app killed), the service continues running
+    // in the background as a foreground service. Returning true enables
+    // onRebind() when the app reconnects.
     @Override
     public boolean onUnbind(Intent intent) {
-        if (client != null && locationCallback != null) {
-            client.removeUpdates(locationCallback);
-        }
+        // Do NOT stop location updates or call stopSelf() — the service
+        // must survive app termination to continue tracking.
         releaseMediaPlayer();
-        releaseWakeLock();
-        stopWatchdog();
-        stopSelf();
-        return false;
+        return true; // triggers onRebind() when app reconnects
+    }
+
+    @Override
+    public void onRebind(Intent intent) {
+        super.onRebind(intent);
+        Logger.info("App reconnected to background geolocation service");
     }
 
     @Override
     public void onDestroy() {
-        if (client != null && locationCallback != null) {
-            client.removeUpdates(locationCallback);
-        }
-        super.onDestroy();
+        stopFusedLocationUpdates();
+        stopHeadlessPosting();
+        cancelAutoStop();
         releaseMediaPlayer();
         releaseWakeLock();
-        stopWatchdog();
+        if (locationBuffer != null) {
+            locationBuffer.close();
+        }
+        super.onDestroy();
     }
 
     private void releaseMediaPlayer() {
@@ -125,44 +170,170 @@ public class BackgroundGeolocationService extends Service {
         wakeLock = null;
     }
 
-    private void restartLocationUpdates() {
-        Logger.debug("Location watchdog timed out, restarting updates");
-        if (client == null || locationCallback == null) {
+
+
+    private void saveTrackingState(String notificationTitle, String notificationMessage, float distanceFilter) {
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        prefs.edit()
+            .putBoolean("is_tracking", true)
+            .putLong("tracking_start_time", System.currentTimeMillis())
+            .putFloat("distance_filter", distanceFilter)
+            .putString("notification_title", notificationTitle)
+            .putString("notification_message", notificationMessage)
+            .apply();
+    }
+
+    private void clearTrackingState() {
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        prefs.edit()
+            .putBoolean("is_tracking", false)
+            .remove("tracking_start_time")
+            .apply();
+    }
+
+    private void restoreAndStartTracking() {
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        float distanceFilter = prefs.getFloat("distance_filter", 0f);
+        String notificationTitle = prefs.getString("notification_title", "Using your location");
+        String notificationMessage = prefs.getString("notification_message", "");
+
+        acquireWakeLock();
+        currentDistanceFilter = distanceFilter;
+
+        startFusedLocationUpdates(distanceFilter);
+        startHeadlessPosting();
+        scheduleAutoStop(prefs.getLong("tracking_start_time", System.currentTimeMillis()));
+
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                startForeground(
+                    NOTIFICATION_ID,
+                    createBackgroundNotification(notificationTitle, notificationMessage),
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
+                );
+            } else {
+                startForeground(NOTIFICATION_ID, createBackgroundNotification(notificationTitle, notificationMessage));
+            }
+        } catch (Exception exception) {
+            Logger.error("Failed to foreground service on restore", exception);
+        }
+    }
+
+    private void startFusedLocationUpdates(float distanceFilter) {
+        LocationRequest locationRequest = new LocationRequest.Builder(
+            Priority.PRIORITY_HIGH_ACCURACY, 10000
+        )
+            .setMinUpdateDistanceMeters(distanceFilter)
+            .setWaitForAccurateLocation(false)
+            .build();
+
+        fusedLocationCallback = new LocationCallback() {
+            @Override
+            public void onLocationResult(LocationResult result) {
+                Location location = result.getLastLocation();
+                if (location == null) return;
+
+                // Buffer location for headless sync
+                if (locationBuffer != null) {
+                    locationBuffer.insert(location);
+                }
+
+                // Route deviation check
+                if (mediaPlayer != null && route != null) {
+                    double[] point = { location.getLongitude(), location.getLatitude() };
+                    boolean offRoute = distancePointToRoute(point) > distanceThreshold;
+                    if (offRoute && !isOffRoute) {
+                        mediaPlayer.start();
+                    }
+                    isOffRoute = offRoute;
+                }
+
+                // Broadcast to plugin (if app is alive)
+                Intent intent = new Intent(ACTION_BROADCAST);
+                intent.putExtra("location", location);
+                intent.putExtra("id", callbackId);
+                LocalBroadcastManager.getInstance(getApplicationContext()).sendBroadcast(intent);
+            }
+        };
+
+        try {
+            fusedLocationClient.requestLocationUpdates(
+                locationRequest, fusedLocationCallback, Looper.getMainLooper()
+            );
+        } catch (SecurityException e) {
+            Logger.error("Location permission not granted", e);
+        }
+    }
+
+    private void stopFusedLocationUpdates() {
+        if (fusedLocationClient != null && fusedLocationCallback != null) {
+            fusedLocationClient.removeLocationUpdates(fusedLocationCallback);
+            fusedLocationCallback = null;
+        }
+    }
+
+    private void startHeadlessPosting() {
+        if (postHandler != null) return;
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        int postIntervalMs = prefs.getInt("headless_post_interval", 60000);
+
+        postHandler = new Handler(Looper.getMainLooper());
+        postRunnable = new Runnable() {
+            @Override
+            public void run() {
+                new Thread(() -> {
+                    try {
+                        httpPoster.postBatch(locationBuffer);
+                    } catch (Exception e) {
+                        Logger.error("Headless HTTP post failed", e);
+                    }
+                }).start();
+                postHandler.postDelayed(this, postIntervalMs);
+            }
+        };
+        postHandler.postDelayed(postRunnable, postIntervalMs);
+    }
+
+    private void stopHeadlessPosting() {
+        if (postHandler != null && postRunnable != null) {
+            postHandler.removeCallbacks(postRunnable);
+        }
+        postHandler = null;
+        postRunnable = null;
+    }
+
+    private void scheduleAutoStop(long trackingStartTime) {
+        long remaining = MAX_TRACKING_DURATION_MS - (System.currentTimeMillis() - trackingStartTime);
+        if (remaining <= 0) {
+            Logger.info("Tracking duration exceeded, stopping immediately");
+            clearTrackingState();
+            stopFusedLocationUpdates();
+            stopHeadlessPosting();
+            releaseWakeLock();
+            stopForeground(true);
+            stopSelf();
             return;
         }
-        client.removeUpdates(locationCallback);
-        if (restartRunnable != null) {
-            watchdogHandler.removeCallbacks(restartRunnable);
-        }
-        restartRunnable = () -> {
-            if (client == null || locationCallback == null) {
-                return;
-            }
-            try {
-                client.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000, currentDistanceFilter, locationCallback);
-            } catch (SecurityException ignore) {
-                // Permission issues are handled in the start() method
-            }
-            startWatchdog();
+
+        autoStopHandler = new Handler(Looper.getMainLooper());
+        autoStopRunnable = () -> {
+            Logger.info("12-hour auto-stop triggered");
+            clearTrackingState();
+            stopFusedLocationUpdates();
+            stopHeadlessPosting();
+            releaseWakeLock();
+            stopForeground(true);
+            stopSelf();
         };
-        watchdogHandler.postDelayed(restartRunnable, 10000);
+        autoStopHandler.postDelayed(autoStopRunnable, remaining);
     }
 
-    private void startWatchdog() {
-        stopWatchdog();
-        if (watchdogRunnable == null) {
-            watchdogRunnable = this::restartLocationUpdates;
+    private void cancelAutoStop() {
+        if (autoStopHandler != null && autoStopRunnable != null) {
+            autoStopHandler.removeCallbacks(autoStopRunnable);
         }
-        watchdogHandler.postDelayed(watchdogRunnable, 60000);
-    }
-
-    private void stopWatchdog() {
-        if (watchdogRunnable != null) {
-            watchdogHandler.removeCallbacks(watchdogRunnable);
-        }
-        if (restartRunnable != null) {
-            watchdogHandler.removeCallbacks(restartRunnable);
-        }
+        autoStopHandler = null;
+        autoStopRunnable = null;
     }
 
     // Handles requests from the activity.
@@ -171,44 +342,23 @@ public class BackgroundGeolocationService extends Service {
         void start(final String id, final String notificationTitle, final String notificationMessage, float distanceFilter) {
             releaseMediaPlayer();
             acquireWakeLock();
-            client = (LocationManager) getSystemService(Context.LOCATION_SERVICE);
             callbackId = id;
             currentDistanceFilter = distanceFilter;
 
-            locationCallback = (location) -> {
-                startWatchdog();
-                if (mediaPlayer != null) {
-                    double[] point = { location.getLongitude(), location.getLatitude() };
-                    var offRoute = distancePointToRoute(point) > distanceThreshold;
-                    if (offRoute == true && isOffRoute == false) {
-                        mediaPlayer.start();
-                    }
-                    isOffRoute = offRoute;
-                }
-                Intent intent = new Intent(ACTION_BROADCAST);
-                intent.putExtra("location", location);
-                intent.putExtra("id", callbackId);
-                LocalBroadcastManager.getInstance(getApplicationContext()).sendBroadcast(intent);
-            };
+            // Save tracking state for recovery after OS kill or reboot
+            saveTrackingState(notificationTitle, notificationMessage, distanceFilter);
 
-            try {
-                client.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000, distanceFilter, locationCallback);
-            } catch (SecurityException ignore) {
-                // According to Android Studio, this method can throw a Security Exception if
-                // permissions are not yet granted. Rather than check the permissions, which is fiddly,
-                // we simply ignore the exception.
-            }
+            // Use FusedLocationProviderClient for better accuracy and battery
+            startFusedLocationUpdates(distanceFilter);
 
-            // Promote the service to the foreground if necessary.
-            // Ideally we would only call 'startForeground' if the service is not already
-            // foregrounded. Unfortunately, 'getForegroundServiceType' was only introduced
-            // in API level 29 and seems to behave weirdly, as reported in #120. However,
-            // it appears that 'startForeground' is idempotent, so we just call it repeatedly
-            // each time a background watcher is added.
+            // Start headless HTTP posting
+            startHeadlessPosting();
+
+            // Schedule 12-hour auto-stop
+            scheduleAutoStop(System.currentTimeMillis());
+
+            // Promote to foreground service
             try {
-                // This method has been known to fail due to weird
-                // permission bugs, so we prevent any exceptions from
-                // crashing the app.
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     startForeground(
                         NOTIFICATION_ID,
@@ -224,8 +374,10 @@ public class BackgroundGeolocationService extends Service {
         }
 
         String stop() {
-            stopWatchdog();
-            client.removeUpdates(locationCallback);
+            clearTrackingState();
+            stopFusedLocationUpdates();
+            stopHeadlessPosting();
+            cancelAutoStop();
             stopForeground(true);
             stopSelf();
             releaseMediaPlayer();

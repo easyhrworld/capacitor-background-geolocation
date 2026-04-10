@@ -20,7 +20,7 @@ buildscript {
 apply plugin: 'com.android.library'
 
 android {
-    namespace = "com.capgo.capacitor_background_geolocation"
+    namespace = "com.easyhrworld.capacitor_background_geolocation"
     compileSdk = project.hasProperty('compileSdkVersion') ? rootProject.ext.compileSdkVersion : 36
     defaultConfig {
         minSdkVersion project.hasProperty('minSdkVersion') ? rootProject.ext.minSdkVersion : 24

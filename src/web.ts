@@ -2,6 +2,8 @@ import { WebPlugin } from '@capacitor/core';
 
 import type {
   BackgroundGeolocationPlugin,
+  BufferedLocation,
+  HeadlessConfig,
   StartOptions,
   Location,
   CallbackError,
@@ -191,5 +193,18 @@ export class BackgroundGeolocationWeb extends WebPlugin implements BackgroundGeo
 
   async getPluginVersion(): Promise<{ version: string }> {
     return { version: 'web' };
+  }
+
+  async configure(_config: HeadlessConfig): Promise<void> {
+    console.warn('BackgroundGeolocation.configure: headless mode is not supported on web');
+  }
+
+  async getBufferedLocations(): Promise<{ locations: BufferedLocation[] }> {
+    console.warn('BackgroundGeolocation.getBufferedLocations: not supported on web');
+    return { locations: [] };
+  }
+
+  async clearBufferedLocations(): Promise<void> {
+    console.warn('BackgroundGeolocation.clearBufferedLocations: not supported on web');
   }
 }

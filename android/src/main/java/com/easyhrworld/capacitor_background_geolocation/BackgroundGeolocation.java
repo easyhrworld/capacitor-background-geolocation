@@ -1,4 +1,4 @@
-package com.capgo.capacitor_background_geolocation;
+package com.easyhrworld.capacitor_background_geolocation;
 
 import android.Manifest;
 import android.app.NotificationChannel;
@@ -9,6 +9,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.ServiceConnection;
+import android.content.SharedPreferences;
 import android.location.Location;
 import android.location.LocationManager;
 import android.net.Uri;
@@ -37,12 +38,14 @@ import org.json.JSONObject;
     name = "BackgroundGeolocation",
     permissions = {
         @Permission(strings = { Manifest.permission.ACCESS_COARSE_LOCATION, Manifest.permission.ACCESS_FINE_LOCATION }, alias = "location"),
+        @Permission(strings = { Manifest.permission.ACCESS_BACKGROUND_LOCATION }, alias = "background_location"),
         @Permission(strings = { Manifest.permission.POST_NOTIFICATIONS }, alias = "notification")
     }
 )
 public class BackgroundGeolocation extends Plugin {
 
-    private final String pluginVersion = "";
+    private static final String PREFS_NAME = "bg_geo_prefs";
+    private final String pluginVersion = "1.0.0";
 
     private CompletableFuture<BackgroundGeolocationService.LocalBinder> serviceConnectionFuture;
     private CompletableFuture<Void> locationPermissionFuture;
@@ -124,16 +127,31 @@ public class BackgroundGeolocation extends Plugin {
             return;
         }
 
-        requestPermissionForAlias("notification", call, "notificationPermissionsCallback");
-
         if (getPermissionState("location") != PermissionState.GRANTED) {
             locationPermissionFuture.completeExceptionally(new SecurityException("User denied location permission"));
             locationPermissionFuture = null;
             return;
         }
 
-        locationPermissionFuture.complete(null);
-        locationPermissionFuture = null;
+        // Request background location permission (Android 10+) after foreground is granted
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            requestPermissionForAlias("background_location", call, "backgroundLocationPermissionsCallback");
+        } else {
+            requestPermissionForAlias("notification", call, "notificationPermissionsCallback");
+            locationPermissionFuture.complete(null);
+            locationPermissionFuture = null;
+        }
+    }
+
+    @PermissionCallback
+    private void backgroundLocationPermissionsCallback(PluginCall call) {
+        // Background location is best-effort — continue even if denied
+        requestPermissionForAlias("notification", call, "notificationPermissionsCallback");
+
+        if (locationPermissionFuture != null && !locationPermissionFuture.isDone()) {
+            locationPermissionFuture.complete(null);
+            locationPermissionFuture = null;
+        }
     }
 
     @PermissionCallback
@@ -340,10 +358,8 @@ public class BackgroundGeolocation extends Plugin {
 
     @Override
     protected void handleOnDestroy() {
-        if (serviceConnectionFuture != null) {
-            serviceConnectionFuture.thenAccept(BackgroundGeolocationService.LocalBinder::stop);
-        }
-
+        // Do NOT stop the service here — it must continue running headless
+        // after the app is destroyed. The service manages its own lifecycle.
         if (locationPermissionFuture != null && !locationPermissionFuture.isDone()) {
             locationPermissionFuture.cancel(true);
         }
@@ -358,6 +374,54 @@ public class BackgroundGeolocation extends Plugin {
             call.resolve(ret);
         } catch (final Exception e) {
             call.reject("Could not get plugin version", e);
+        }
+    }
+
+    @PluginMethod
+    public void configure(PluginCall call) {
+        String serverUrl = call.getString("serverUrl", "");
+        String authToken = call.getString("authToken", "");
+        String employeeId = call.getString("employeeId", "");
+        String tenantId = call.getString("tenantId", "");
+        int batchSize = call.getInt("batchSize", 20);
+        int postIntervalMs = call.getInt("postIntervalMs", 60000);
+
+        SharedPreferences prefs = getContext().getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+        prefs.edit()
+            .putString("headless_server_url", serverUrl)
+            .putString("headless_auth_token", authToken)
+            .putString("headless_employee_id", employeeId)
+            .putString("headless_tenant_id", tenantId)
+            .putInt("headless_batch_size", batchSize)
+            .putInt("headless_post_interval", postIntervalMs)
+            .apply();
+
+        call.resolve();
+    }
+
+    @PluginMethod
+    public void getBufferedLocations(PluginCall call) {
+        try {
+            LocationBuffer buffer = new LocationBuffer(getContext());
+            JSONArray locations = buffer.getAll();
+            JSObject ret = new JSObject();
+            ret.put("locations", locations);
+            call.resolve(ret);
+            buffer.close();
+        } catch (Exception e) {
+            call.reject("Failed to get buffered locations", e);
+        }
+    }
+
+    @PluginMethod
+    public void clearBufferedLocations(PluginCall call) {
+        try {
+            LocationBuffer buffer = new LocationBuffer(getContext());
+            buffer.clearAll();
+            buffer.close();
+            call.resolve();
+        } catch (Exception e) {
+            call.reject("Failed to clear buffered locations", e);
         }
     }
 }

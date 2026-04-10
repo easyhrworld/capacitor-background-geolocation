@@ -1,7 +1,7 @@
 {
-  "name": "@capgo/background-geolocation",
-  "version": "8.0.28",
-  "description": "Receive accurate geolocation updates even while the app is in the background.",
+  "name": "@easyhrworld/capacitor-background-geolocation",
+  "version": "1.0.0",
+  "description": "Background geolocation with headless mode, surviving app kills and reboots.",
   "main": "dist/plugin.cjs.js",
   "module": "dist/esm/index.js",
   "types": "dist/esm/index.d.ts",
@@ -19,12 +19,12 @@
   "license": "MPL-2.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Cap-go/capacitor-background-geolocation.git"
+    "url": "git+https://github.com/easyhrworld/capacitor-background-geolocation.git"
   },
   "bugs": {
-    "url": "https://github.com/Cap-go/capacitor-background-geolocation/issues"
+    "url": "https://github.com/easyhrworld/capacitor-background-geolocation/issues"
   },
-  "homepage": "https://capgo.app/docs/plugins/background-geolocation/",
+  "homepage": "https://github.com/easyhrworld/capacitor-background-geolocation",
   "scripts": {
     "verify": "npm run verify:ios && npm run verify:android && npm run verify:web",
     "verify:ios": "xcodebuild -scheme CapgoBackgroundGeolocation -destination generic/platform=iOS",
