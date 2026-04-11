@@ -161,16 +161,16 @@ public class BackgroundGeolocation extends Plugin {
 
     @PluginMethod
     public void stop(PluginCall call) {
-        if (serviceConnectionFuture == null) {
-            call.resolve();
-            return;
-        }
+        // Always connect to the service to stop it — even if serviceConnectionFuture
+        // is null (e.g. app was killed and reopened while service was running headless)
         getServiceConnection()
             .thenAccept((service) -> {
                 var callbackId = service.stop();
-                PluginCall savedCall = getBridge().getSavedCall(callbackId);
-                if (savedCall != null) {
-                    savedCall.release(getBridge());
+                if (callbackId != null) {
+                    PluginCall savedCall = getBridge().getSavedCall(callbackId);
+                    if (savedCall != null) {
+                        savedCall.release(getBridge());
+                    }
                 }
                 call.resolve();
                 serviceConnectionFuture = null;
