@@ -213,7 +213,11 @@ Configuration specific to Android can be made in `strings.xml`:
 * [`openSettings()`](#opensettings)
 * [`setPlannedRoute(...)`](#setplannedroute)
 * [`getPluginVersion()`](#getpluginversion)
+* [`configure(...)`](#configure)
+* [`getBufferedLocations()`](#getbufferedlocations)
+* [`clearBufferedLocations()`](#clearbufferedlocations)
 * [Interfaces](#interfaces)
+* [Type Aliases](#type-aliases)
 
 </docgen-index>
 
@@ -221,7 +225,6 @@ Configuration specific to Android can be made in `strings.xml`:
 <!--Update the source file JSDoc comments and rerun docgen to update the docs below-->
 
 Main plugin interface for background geolocation functionality.
-Provides methods to manage location updates and access device settings.
 
 ### start(...)
 
@@ -229,14 +232,13 @@ Provides methods to manage location updates and access device settings.
 start(options: StartOptions, callback: (position?: Location | undefined, error?: CallbackError | undefined) => void) => Promise<void>
 ```
 
-To start listening for changes in the device's location, call this method.
-A Promise is returned to indicate that it finished the call. The callback will be called every time a new location
-is available, or if there was an error when calling this method. Don't rely on promise rejection for this.
+Start listening for location changes. The callback is invoked
+each time a new location is available.
 
-| Param          | Type                                                                                                                      | Description                                                                       |
-| -------------- | ------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
-| **`options`**  | <code><a href="#startoptions">StartOptions</a></code>                                                                     | The configuration options                                                         |
-| **`callback`** | <code>(position?: <a href="#location">Location</a>, error?: <a href="#callbackerror">CallbackError</a>) =&gt; void</code> | The callback function invoked when a new location is available or an error occurs |
+| Param          | Type                                                                                                                      |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| **`options`**  | <code><a href="#startoptions">StartOptions</a></code>                                                                     |
+| **`callback`** | <code>(position?: <a href="#location">Location</a>, error?: <a href="#callbackerror">CallbackError</a>) =&gt; void</code> |
 
 **Since:** 7.0.9
 
@@ -249,7 +251,7 @@ is available, or if there was an error when calling this method. Don't rely on p
 stop() => Promise<void>
 ```
 
-Stops location updates.
+Stop location updates and the background service.
 
 **Since:** 7.0.9
 
@@ -263,7 +265,6 @@ openSettings() => Promise<void>
 ```
 
 Opens the device's location settings page.
-Useful for directing users to enable location services or adjust permissions.
 
 **Since:** 7.0.0
 
@@ -276,12 +277,11 @@ Useful for directing users to enable location services or adjust permissions.
 setPlannedRoute(options: SetPlannedRouteOptions) => Promise<void>
 ```
 
-Plays a sound file when the user deviates from the planned route.
-This should be used to play a sound (in the background too, only for native).
+Set a planned route with audio alert on deviation.
 
-| Param         | Type                                                                      | Description                                              |
-| ------------- | ------------------------------------------------------------------------- | -------------------------------------------------------- |
-| **`options`** | <code><a href="#setplannedrouteoptions">SetPlannedRouteOptions</a></code> | The options for setting the planned route and sound file |
+| Param         | Type                                                                      |
+| ------------- | ------------------------------------------------------------------------- |
+| **`options`** | <code><a href="#setplannedrouteoptions">SetPlannedRouteOptions</a></code> |
 
 **Since:** 7.0.11
 
@@ -294,9 +294,56 @@ This should be used to play a sound (in the background too, only for native).
 getPluginVersion() => Promise<{ version: string; }>
 ```
 
-Get the native Capacitor plugin version
+Get the native Capacitor plugin version.
 
 **Returns:** <code>Promise&lt;{ version: string; }&gt;</code>
+
+--------------------
+
+
+### configure(...)
+
+```typescript
+configure(config: HeadlessConfig) => Promise<void>
+```
+
+Configure headless mode for native HTTP posting of location
+batches to a server endpoint. Call this before start() or
+whenever the auth token needs refreshing.
+
+| Param        | Type                                                      |
+| ------------ | --------------------------------------------------------- |
+| **`config`** | <code><a href="#headlessconfig">HeadlessConfig</a></code> |
+
+**Since:** 1.0.0
+
+--------------------
+
+
+### getBufferedLocations()
+
+```typescript
+getBufferedLocations() => Promise<{ locations: BufferedLocation[]; }>
+```
+
+Get all locations buffered locally on the device.
+
+**Returns:** <code>Promise&lt;{ locations: BufferedLocation[]; }&gt;</code>
+
+**Since:** 1.0.0
+
+--------------------
+
+
+### clearBufferedLocations()
+
+```typescript
+clearBufferedLocations() => Promise<void>
+```
+
+Clear all locally buffered locations.
+
+**Since:** 1.0.0
 
 --------------------
 
@@ -308,37 +355,38 @@ Get the native Capacitor plugin version
 
 The options for configuring for location updates.
 
-| Prop                     | Type                 | Description                                                                                                                                                                                                                                                                                                                                                                                                          | Default                            | Since |
-| ------------------------ | -------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------- | ----- |
-| **`backgroundMessage`**  | <code>string</code>  | If the "backgroundMessage" option is defined, the plugin will provide location updates whether the app is in the background or the foreground. If it is not defined, location updates are only guaranteed in the foreground. This is true on both platforms. On Android, a notification must be shown to continue receiving location updates in the background. This option specifies the text of that notification. |                                    | 7.0.9 |
-| **`backgroundTitle`**    | <code>string</code>  | The title of the notification mentioned above.                                                                                                                                                                                                                                                                                                                                                                       | <code>"Using your location"</code> | 7.0.9 |
-| **`requestPermissions`** | <code>boolean</code> | Whether permissions should be requested from the user automatically, if they are not already granted.                                                                                                                                                                                                                                                                                                                | <code>true</code>                  | 7.0.9 |
-| **`stale`**              | <code>boolean</code> | If "true", stale locations may be delivered while the device obtains a GPS fix. You are responsible for checking the "time" property. If "false", locations are guaranteed to be up to date.                                                                                                                                                                                                                         | <code>false</code>                 | 7.0.9 |
-| **`distanceFilter`**     | <code>number</code>  | The distance in meters that the device must move before a new location update is triggered. This is used to filter out small movements and reduce the number of updates.                                                                                                                                                                                                                                             | <code>0</code>                     | 7.0.9 |
+| Prop                        | Type                 | Description                                                                                                                                                                                                                                                                                                                                                                                                          | Default                            | Since |
+| --------------------------- | -------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------- | ----- |
+| **`backgroundMessage`**     | <code>string</code>  | If the "backgroundMessage" option is defined, the plugin will provide location updates whether the app is in the background or the foreground. If it is not defined, location updates are only guaranteed in the foreground. This is true on both platforms. On Android, a notification must be shown to continue receiving location updates in the background. This option specifies the text of that notification. |                                    | 7.0.9 |
+| **`backgroundTitle`**       | <code>string</code>  | The title of the notification mentioned above.                                                                                                                                                                                                                                                                                                                                                                       | <code>"Using your location"</code> | 7.0.9 |
+| **`requestPermissions`**    | <code>boolean</code> | Whether permissions should be requested from the user automatically, if they are not already granted.                                                                                                                                                                                                                                                                                                                | <code>true</code>                  | 7.0.9 |
+| **`stale`**                 | <code>boolean</code> | If "true", stale locations may be delivered while the device obtains a GPS fix. You are responsible for checking the "time" property. If "false", locations are guaranteed to be up to date.                                                                                                                                                                                                                         | <code>false</code>                 | 7.0.9 |
+| **`distanceFilter`**        | <code>number</code>  | The distance in meters that the device must move before a new location update is triggered.                                                                                                                                                                                                                                                                                                                          | <code>0</code>                     | 7.0.9 |
+| **`stopOnTerminate`**       | <code>boolean</code> | If false, the service will continue running after the app is terminated.                                                                                                                                                                                                                                                                                                                                             | <code>false</code>                 | 1.0.0 |
+| **`startOnBoot`**           | <code>boolean</code> | If true, the service will restart after a device reboot if it was running before the reboot.                                                                                                                                                                                                                                                                                                                         | <code>true</code>                  | 1.0.0 |
+| **`maxTrackingDurationMs`** | <code>number</code>  | Maximum tracking duration in milliseconds. The service will auto-stop after this duration to prevent indefinite battery drain if the user forgets to check out.                                                                                                                                                                                                                                                      | <code>43200000 (12 hours)</code>   | 1.0.0 |
 
 
 #### Location
 
 Represents a geographical location with various attributes.
-Contains all the standard location properties returned by GPS/network providers.
 
-| Prop                   | Type                        | Description                                                                                                                            | Since |
-| ---------------------- | --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- | ----- |
-| **`latitude`**         | <code>number</code>         | Latitude in degrees. Range: -90.0 to +90.0                                                                                             | 7.0.0 |
-| **`longitude`**        | <code>number</code>         | Longitude in degrees. Range: -180.0 to +180.0                                                                                          | 7.0.0 |
-| **`accuracy`**         | <code>number</code>         | Radius of horizontal uncertainty in metres, with 68% confidence. Lower values indicate more accurate location.                         | 7.0.0 |
-| **`altitude`**         | <code>number \| null</code> | Metres above sea level (or null if not available).                                                                                     | 7.0.0 |
-| **`altitudeAccuracy`** | <code>number \| null</code> | Vertical uncertainty in metres, with 68% confidence (or null if not available).                                                        | 7.0.0 |
-| **`simulated`**        | <code>boolean</code>        | `true` if the location was simulated by software, rather than GPS. Useful for detecting mock locations in development or testing.      | 7.0.0 |
-| **`bearing`**          | <code>number \| null</code> | Deviation from true north in degrees (or null if not available). Range: 0.0 to 360.0                                                   | 7.0.0 |
-| **`speed`**            | <code>number \| null</code> | Speed in metres per second (or null if not available).                                                                                 | 7.0.0 |
-| **`time`**             | <code>number \| null</code> | Time the location was produced, in milliseconds since the unix epoch. Use this to check if a location is stale when using stale: true. | 7.0.0 |
+| Prop                   | Type                        | Description                                                                     | Since |
+| ---------------------- | --------------------------- | ------------------------------------------------------------------------------- | ----- |
+| **`latitude`**         | <code>number</code>         | Latitude in degrees. Range: -90.0 to +90.0                                      | 7.0.0 |
+| **`longitude`**        | <code>number</code>         | Longitude in degrees. Range: -180.0 to +180.0                                   | 7.0.0 |
+| **`accuracy`**         | <code>number</code>         | Radius of horizontal uncertainty in metres, with 68% confidence.                | 7.0.0 |
+| **`altitude`**         | <code>number \| null</code> | Metres above sea level (or null if not available).                              | 7.0.0 |
+| **`altitudeAccuracy`** | <code>number \| null</code> | Vertical uncertainty in metres, with 68% confidence (or null if not available). | 7.0.0 |
+| **`simulated`**        | <code>boolean</code>        | `true` if the location was simulated by software, rather than GPS.              | 7.0.0 |
+| **`bearing`**          | <code>number \| null</code> | Deviation from true north in degrees (or null if not available).                | 7.0.0 |
+| **`speed`**            | <code>number \| null</code> | Speed in metres per second (or null if not available).                          | 7.0.0 |
+| **`time`**             | <code>number \| null</code> | Time the location was produced, in milliseconds since the unix epoch.           | 7.0.0 |
 
 
 #### CallbackError
 
 Error object that may be passed to the location start callback.
-Extends the standard Error with optional error codes.
 
 | Prop       | Type                | Description                                           | Since |
 | ---------- | ------------------- | ----------------------------------------------------- | ----- |
@@ -347,10 +395,51 @@ Extends the standard Error with optional error codes.
 
 #### SetPlannedRouteOptions
 
-| Prop            | Type                            | Description                                                                                                                                                                                                                                        | Default         | Since  |
-| --------------- | ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------- | ------ |
-| **`soundFile`** | <code>string</code>             | The name of the sound file to play. Must be a valid sound relative path in the app's public folder to work for both web and native platforms. There's no need to include the public folder in the path.                                            |                 | 7.0.10 |
-| **`route`**     | <code>[number, number][]</code> | The planned route as an array of longitude and latitude pairs. Each pair represents a point on the route. This is used to define a route that the user can follow. The route is used to play a sound when the user deviates from it.               |                 | 7.0.11 |
-| **`distance`**  | <code>number</code>             | The distance in meters that the user must deviate from the planned route to trigger the sound. This is used to determine how far off the route the user can be before the sound is played. If not specified, a default value of 50 meters is used. | <code>50</code> | 7.0.11 |
+| Prop            | Type                            | Description                                                                                         | Default         | Since  |
+| --------------- | ------------------------------- | --------------------------------------------------------------------------------------------------- | --------------- | ------ |
+| **`soundFile`** | <code>string</code>             | The name of the sound file to play. Must be a valid sound relative path in the app's public folder. |                 | 7.0.10 |
+| **`route`**     | <code>[number, number][]</code> | The planned route as an array of longitude and latitude pairs.                                      |                 | 7.0.11 |
+| **`distance`**  | <code>number</code>             | The distance in meters to deviate before triggering the sound.                                      | <code>50</code> | 7.0.11 |
+
+
+#### HeadlessConfig
+
+Configuration for headless mode — native HTTP posting of location
+batches to a server endpoint without the WebView being alive.
+
+| Prop                 | Type                                                            | Description                                             | Default            | Since |
+| -------------------- | --------------------------------------------------------------- | ------------------------------------------------------- | ------------------ | ----- |
+| **`serverUrl`**      | <code>string</code>                                             | The server URL to POST location batches to.             |                    | 1.0.0 |
+| **`authToken`**      | <code>string</code>                                             | JWT Bearer token for authentication.                    |                    | 1.0.0 |
+| **`employeeId`**     | <code>string</code>                                             | Employee identifier included in the POST payload.       |                    | 1.0.0 |
+| **`tenantId`**       | <code>string</code>                                             | Tenant identifier included in the POST payload.         |                    | 1.0.0 |
+| **`headers`**        | <code><a href="#record">Record</a>&lt;string, string&gt;</code> | Additional HTTP headers to include in the POST request. |                    | 1.0.0 |
+| **`batchSize`**      | <code>number</code>                                             | Number of locations to include in each batch POST.      | <code>20</code>    | 1.0.0 |
+| **`postIntervalMs`** | <code>number</code>                                             | Interval in milliseconds between batch POST attempts.   | <code>60000</code> | 1.0.0 |
+
+
+#### BufferedLocation
+
+A buffered location record stored locally on the device.
+
+| Prop            | Type                |
+| --------------- | ------------------- |
+| **`lat`**       | <code>number</code> |
+| **`lng`**       | <code>number</code> |
+| **`accuracy`**  | <code>number</code> |
+| **`speed`**     | <code>number</code> |
+| **`bearing`**   | <code>number</code> |
+| **`altitude`**  | <code>number</code> |
+| **`timestamp`** | <code>number</code> |
+
+
+### Type Aliases
+
+
+#### Record
+
+Construct a type with a set of properties K of type T
+
+<code>{ [P in K]: T; }</code>
 
 </docgen-api>
