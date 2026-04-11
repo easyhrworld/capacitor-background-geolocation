@@ -427,14 +427,22 @@ public class BackgroundGeolocationService extends Service {
             .setWhen(System.currentTimeMillis());
 
         try {
-            String name = getAppString("capacitor_background_geolocation_notification_icon", "mipmap/ic_launcher", getApplicationContext());
-            String[] parts = name.split("/");
-            // It is actually necessary to set a valid icon for the notification to behave
-            // correctly when tapped. If there is no icon specified, tapping it will open the
-            // app's settings, rather than bringing the application to the foreground.
-            builder.setSmallIcon(getAppResourceIdentifier(parts[1], parts[0], getApplicationContext()));
+            String name = getAppString("capacitor_background_geolocation_notification_icon", null, getApplicationContext());
+            if (name != null) {
+                String[] parts = name.split("/");
+                int iconId = getAppResourceIdentifier(parts[1], parts[0], getApplicationContext());
+                if (iconId != 0) {
+                    builder.setSmallIcon(iconId);
+                } else {
+                    builder.setSmallIcon(android.R.drawable.ic_menu_mylocation);
+                }
+            } else {
+                // Use Android's built-in location icon as default (proper monochrome)
+                builder.setSmallIcon(android.R.drawable.ic_menu_mylocation);
+            }
         } catch (Exception e) {
             Logger.error("Could not set notification icon", e);
+            builder.setSmallIcon(android.R.drawable.ic_menu_mylocation);
         }
 
         try {
