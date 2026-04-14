@@ -65,6 +65,8 @@ public class BackgroundGeolocation: CAPPlugin, CLLocationManagerDelegate, CAPBri
     private var autoStopTimer: Timer?
     private var maxTrackingDurationMs: Double = 43200000 // 12 hours
     private var isBackgroundMode: Bool = false
+    private var locationsSinceLastPost: Int = 0
+    private var postBatchThreshold: Int = 5 // Post after this many locations
 
     // UserDefaults keys
     private static let prefsPrefix = "bg_geo_"
@@ -130,6 +132,7 @@ public class BackgroundGeolocation: CAPPlugin, CLLocationManagerDelegate, CAPBri
             manager.allowsBackgroundLocationUpdates = true
             manager.showsBackgroundLocationIndicator = true
             manager.pausesLocationUpdatesAutomatically = false
+            manager.activityType = .otherNavigation
 
             self.isBackgroundMode = true
             self.maxTrackingDurationMs = maxDuration > 0 ? maxDuration : 43200000
@@ -325,6 +328,7 @@ public class BackgroundGeolocation: CAPPlugin, CLLocationManagerDelegate, CAPBri
         manager.allowsBackgroundLocationUpdates = background
         manager.showsBackgroundLocationIndicator = background
         manager.pausesLocationUpdatesAutomatically = false
+        manager.activityType = .otherNavigation // Reduces iOS throttling in background
     }
 
     private func handlePermissions(_ manager: CLLocationManager, background: Bool) -> Bool {
@@ -474,6 +478,13 @@ public class BackgroundGeolocation: CAPPlugin, CLLocationManagerDelegate, CAPBri
         // Always buffer location in background mode
         if isBackgroundMode {
             locationBuffer?.insert(location)
+            locationsSinceLastPost += 1
+
+            // Post buffered locations using beginBackgroundTask for reliable background execution
+            if locationsSinceLastPost >= postBatchThreshold {
+                locationsSinceLastPost = 0
+                postBufferedLocationsInBackground()
+            }
         }
 
         // Send to JS callback if available
@@ -482,6 +493,30 @@ public class BackgroundGeolocation: CAPPlugin, CLLocationManagerDelegate, CAPBri
             if isLocationValid(location) {
                 checkRouteDeviation(location)
                 call.resolve(formatLocation(location))
+            }
+        }
+    }
+
+    /// Post buffered locations using beginBackgroundTask for ~30s of guaranteed execution time
+    private func postBufferedLocationsInBackground() {
+        guard let buffer = locationBuffer, let poster = httpPoster else { return }
+
+        var bgTaskId: UIBackgroundTaskIdentifier = .invalid
+        bgTaskId = UIApplication.shared.beginBackgroundTask(withName: "LocationPost") {
+            // Expiration handler — clean up
+            if bgTaskId != .invalid {
+                UIApplication.shared.endBackgroundTask(bgTaskId)
+                bgTaskId = .invalid
+            }
+        }
+
+        DispatchQueue.global(qos: .utility).async {
+            poster.postBatch(buffer)
+            DispatchQueue.main.async {
+                if bgTaskId != .invalid {
+                    UIApplication.shared.endBackgroundTask(bgTaskId)
+                    bgTaskId = .invalid
+                }
             }
         }
     }
