@@ -11,9 +11,6 @@ let null = Optional<Double>.none as Any
 func formatLocation(_ location: CLLocation) -> PluginCallResultData {
     var simulated = false
     if #available(iOS 15, *) {
-        // Prior to iOS 15, it was not possible to detect simulated locations.
-        // But in general, it is very difficult to simulate locations on iOS in
-        // production.
         if let sourceInfo = location.sourceInformation {
             simulated = sourceInfo.isSimulatedBySoftware
         }
@@ -46,7 +43,10 @@ public class BackgroundGeolocation: CAPPlugin, CLLocationManagerDelegate, CAPBri
         CAPPluginMethod(name: "stop", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "openSettings", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "setPlannedRoute", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "getPluginVersion", returnType: CAPPluginReturnPromise)
+        CAPPluginMethod(name: "getPluginVersion", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "configure", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "getBufferedLocations", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "clearBufferedLocations", returnType: CAPPluginReturnPromise),
     ]
     private var locationManager: CLLocationManager?
     private var created: Date?
@@ -56,25 +56,103 @@ public class BackgroundGeolocation: CAPPlugin, CLLocationManagerDelegate, CAPBri
     private var audioPlayer: AVAudioPlayer?
     private var plannedRoute: [[Double]] = []
     private var isOffRoute: Bool = true
-    private var distanceThreshold: Double = 50.0 // Default distance threshold in meters
+    private var distanceThreshold: Double = 50.0
+
+    // Headless mode support
+    private var locationBuffer: LocationBuffer?
+    private var httpPoster: HeadlessHttpPoster?
+    private var postTimer: Timer?
+    private var autoStopTimer: Timer?
+    private var maxTrackingDurationMs: Double = 43200000 // 12 hours
+    private var isBackgroundMode: Bool = false
+
+    // UserDefaults keys
+    private static let prefsPrefix = "bg_geo_"
+    private static let keyIsTracking = "bg_geo_is_tracking"
+    private static let keyTrackingStartTime = "bg_geo_tracking_start_time"
+    private static let keyDistanceFilter = "bg_geo_distance_filter"
+    private static let keyMaxDuration = "bg_geo_max_duration"
 
     // Earth radius in meters for distance calculations
     private static let earthRadiusMeters: Double = 6371000.0
 
     @objc override public func load() {
         UIDevice.current.isBatteryMonitoringEnabled = true
+        locationBuffer = LocationBuffer()
+        httpPoster = HeadlessHttpPoster()
+
+        // Check if we should resume tracking (e.g., after app relaunch by significant location change)
+        restoreTrackingIfNeeded()
     }
+
+    // MARK: - Tracking State Persistence
+
+    private func saveTrackingState() {
+        let defaults = UserDefaults.standard
+        defaults.set(true, forKey: Self.keyIsTracking)
+        defaults.set(Date().timeIntervalSince1970 * 1000, forKey: Self.keyTrackingStartTime)
+        defaults.set(maxTrackingDurationMs, forKey: Self.keyMaxDuration)
+    }
+
+    private func clearTrackingState() {
+        let defaults = UserDefaults.standard
+        defaults.set(false, forKey: Self.keyIsTracking)
+        defaults.removeObject(forKey: Self.keyTrackingStartTime)
+    }
+
+    private func restoreTrackingIfNeeded() {
+        let defaults = UserDefaults.standard
+        guard defaults.bool(forKey: Self.keyIsTracking) else { return }
+
+        let startTime = defaults.double(forKey: Self.keyTrackingStartTime)
+        let maxDuration = defaults.double(forKey: Self.keyMaxDuration)
+        let elapsed = Date().timeIntervalSince1970 * 1000 - startTime
+
+        // If exceeded max duration, clear state and don't resume
+        if maxDuration > 0 && elapsed >= maxDuration {
+            print("[BackgroundGeolocation] Tracking exceeded max duration, not resuming")
+            clearTrackingState()
+            return
+        }
+
+        print("[BackgroundGeolocation] Restoring tracking after app relaunch")
+
+        // Resume tracking in background mode
+        DispatchQueue.main.async {
+            self.locationManager = CLLocationManager()
+            guard let manager = self.locationManager else { return }
+            manager.delegate = self
+            self.created = Date()
+
+            manager.desiredAccuracy = kCLLocationAccuracyBest
+            let distanceFilter = defaults.double(forKey: Self.keyDistanceFilter)
+            manager.distanceFilter = distanceFilter > 0 ? distanceFilter : kCLDistanceFilterNone
+            manager.allowsBackgroundLocationUpdates = true
+            manager.showsBackgroundLocationIndicator = true
+            manager.pausesLocationUpdatesAutomatically = false
+
+            self.isBackgroundMode = true
+            self.maxTrackingDurationMs = maxDuration > 0 ? maxDuration : 43200000
+
+            manager.startUpdatingLocation()
+            manager.startMonitoringSignificantLocationChanges()
+            self.isUpdatingLocation = true
+
+            self.startAutoStopTimer(remainingMs: maxDuration - elapsed)
+            self.startPostTimer()
+        }
+    }
+
+    // MARK: - Start / Stop
 
     @objc func start(_ call: CAPPluginCall) {
         call.keepAlive = true
 
-        // CLLocationManager requires main thread
         DispatchQueue.main.async {
-            // Check if already started
             if self.locationManager != nil {
                 return call.reject("Location tracking already started", "ALREADY_STARTED")
             }
-            // Create fresh location manager and initialize date
+
             self.locationManager = CLLocationManager()
             guard let manager = self.locationManager else {
                 return call.reject("Failed to create location manager")
@@ -85,8 +163,30 @@ public class BackgroundGeolocation: CAPPlugin, CLLocationManagerDelegate, CAPBri
             let background = call.getString("backgroundMessage") != nil
             self.allowStale = call.getBool("stale") ?? false
             self.activeCallbackId = call.callbackId
+            self.isBackgroundMode = background
+
+            // Read options
+            let distanceFilter = call.getDouble("distanceFilter") ?? 0
+            self.maxTrackingDurationMs = call.getDouble("maxTrackingDurationMs") ?? 43200000
+
+            // Save distance filter for potential restore
+            UserDefaults.standard.set(distanceFilter, forKey: Self.keyDistanceFilter)
 
             self.configureLocationManager(manager, call: call, background: background)
+
+            if background {
+                // Save tracking state for persistence
+                self.saveTrackingState()
+
+                // Start significant location change monitoring (survives app termination)
+                manager.startMonitoringSignificantLocationChanges()
+
+                // Start auto-stop timer
+                self.startAutoStopTimer(remainingMs: self.maxTrackingDurationMs)
+
+                // Start headless HTTP posting timer
+                self.startPostTimer()
+            }
 
             if call.getBool("requestPermissions") != false {
                 if self.handlePermissions(manager, background: background) {
@@ -96,6 +196,116 @@ public class BackgroundGeolocation: CAPPlugin, CLLocationManagerDelegate, CAPBri
             return self.startUpdatingLocation()
         }
     }
+
+    @objc func stop(_ call: CAPPluginCall) {
+        DispatchQueue.main.async {
+            self.stopAllTracking()
+
+            if let callbackId = self.activeCallbackId {
+                if let savedCall = self.bridge?.savedCall(withID: callbackId) {
+                    self.bridge?.releaseCall(savedCall)
+                }
+                self.activeCallbackId = nil
+            }
+            return call.resolve()
+        }
+    }
+
+    private func stopAllTracking() {
+        stopUpdatingLocation()
+
+        locationManager?.stopMonitoringSignificantLocationChanges()
+        locationManager?.delegate = nil
+        locationManager = nil
+        created = nil
+
+        stopPostTimer()
+        stopAutoStopTimer()
+        clearTrackingState()
+    }
+
+    // MARK: - Configure (Headless Mode)
+
+    @objc func configure(_ call: CAPPluginCall) {
+        let defaults = UserDefaults.standard
+        let prefix = Self.prefsPrefix
+
+        if let serverUrl = call.getString("serverUrl") {
+            defaults.set(serverUrl, forKey: "\(prefix)server_url")
+        }
+        if let authToken = call.getString("authToken") {
+            defaults.set(authToken, forKey: "\(prefix)auth_token")
+        }
+        if let employeeId = call.getString("employeeId") {
+            defaults.set(employeeId, forKey: "\(prefix)employee_id")
+        }
+        if let tenantId = call.getString("tenantId") {
+            defaults.set(tenantId, forKey: "\(prefix)tenant_id")
+        }
+        if let batchSize = call.getInt("batchSize") {
+            defaults.set(batchSize, forKey: "\(prefix)batch_size")
+        }
+        if let postIntervalMs = call.getInt("postIntervalMs") {
+            defaults.set(postIntervalMs, forKey: "\(prefix)post_interval")
+        }
+
+        call.resolve()
+    }
+
+    // MARK: - Buffered Locations
+
+    @objc func getBufferedLocations(_ call: CAPPluginCall) {
+        guard let buffer = locationBuffer else {
+            return call.resolve(["locations": []])
+        }
+        let all = buffer.getAll()
+        call.resolve(["locations": all])
+    }
+
+    @objc func clearBufferedLocations(_ call: CAPPluginCall) {
+        locationBuffer?.clearAll()
+        call.resolve()
+    }
+
+    // MARK: - Timers
+
+    private func startPostTimer() {
+        stopPostTimer()
+        let defaults = UserDefaults.standard
+        let intervalMs = defaults.integer(forKey: "\(Self.prefsPrefix)post_interval")
+        let interval = intervalMs > 0 ? TimeInterval(intervalMs) / 1000.0 : 60.0
+
+        postTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
+            DispatchQueue.global(qos: .utility).async {
+                guard let self = self, let buffer = self.locationBuffer, let poster = self.httpPoster else { return }
+                poster.postBatch(buffer)
+            }
+        }
+    }
+
+    private func stopPostTimer() {
+        postTimer?.invalidate()
+        postTimer = nil
+    }
+
+    private func startAutoStopTimer(remainingMs: Double) {
+        stopAutoStopTimer()
+        let remainingSeconds = max(remainingMs / 1000.0, 1.0)
+
+        autoStopTimer = Timer.scheduledTimer(withTimeInterval: remainingSeconds, repeats: false) { [weak self] _ in
+            DispatchQueue.main.async {
+                print("[BackgroundGeolocation] Auto-stop: max tracking duration reached")
+                self?.stopAllTracking()
+            }
+        }
+    }
+
+    private func stopAutoStopTimer() {
+        autoStopTimer?.invalidate()
+        autoStopTimer = nil
+    }
+
+    // MARK: - Location Manager Configuration
 
     private func configureLocationManager(_ manager: CLLocationManager, call: CAPPluginCall, background: Bool) {
         let externalPower = [
@@ -108,8 +318,6 @@ public class BackgroundGeolocation: CAPPlugin, CLLocationManagerDelegate, CAPBri
                 : kCLLocationAccuracyBest
         )
         var distanceFilter = call.getDouble("distanceFilter")
-        // It appears that setting manager.distanceFilter to 0 can prevent
-        // subsequent location updates. See issue #88.
         if distanceFilter == nil || distanceFilter == 0 {
             distanceFilter = kCLDistanceFilterNone
         }
@@ -134,30 +342,12 @@ public class BackgroundGeolocation: CAPPlugin, CLLocationManagerDelegate, CAPBri
             return true
         }
         if background && status == .authorizedWhenInUse {
-            // Attempt to escalate.
             manager.requestAlwaysAuthorization()
         }
         return false
     }
 
-    @objc func stop(_ call: CAPPluginCall) {
-        // CLLocationManager requires main thread
-        DispatchQueue.main.async {
-            self.stopUpdatingLocation()
-
-            self.locationManager?.delegate = nil
-            self.locationManager = nil
-            self.created = nil
-
-            if let callbackId = self.activeCallbackId {
-                if let savedCall = self.bridge?.savedCall(withID: callbackId) {
-                    self.bridge?.releaseCall(savedCall)
-                }
-                self.activeCallbackId = nil
-            }
-            return call.resolve()
-        }
-    }
+    // MARK: - Open Settings
 
     @objc func openSettings(_ call: CAPPluginCall) {
         DispatchQueue.main.async {
@@ -180,6 +370,8 @@ public class BackgroundGeolocation: CAPPlugin, CLLocationManagerDelegate, CAPBri
             }
         }
     }
+
+    // MARK: - Planned Route
 
     @objc func setPlannedRoute(_ call: CAPPluginCall) {
         DispatchQueue.global(qos: .background).async { [weak self] in
@@ -213,7 +405,6 @@ public class BackgroundGeolocation: CAPPlugin, CLLocationManagerDelegate, CAPBri
                 self.audioPlayer = nil
                 self.audioPlayer = try AVAudioPlayer(contentsOf: url)
 
-                // Store route configuration
                 self.plannedRoute = route
                 self.distanceThreshold = distance
                 self.isOffRoute = true
@@ -225,9 +416,9 @@ public class BackgroundGeolocation: CAPPlugin, CLLocationManagerDelegate, CAPBri
         }
     }
 
+    // MARK: - Location Updates
+
     private func startUpdatingLocation() {
-        // Avoid unnecessary calls to startUpdatingLocation, which can
-        // result in extraneous invocations of didFailWithError.
         if !isUpdatingLocation, let manager = locationManager {
             manager.startUpdatingLocation()
             isUpdatingLocation = true
@@ -248,6 +439,63 @@ public class BackgroundGeolocation: CAPPlugin, CLLocationManagerDelegate, CAPBri
                 location.timestamp >= created
         )
     }
+
+    // MARK: - CLLocationManagerDelegate
+
+    public func locationManager(
+        _ manager: CLLocationManager,
+        didFailWithError error: Error
+    ) {
+        guard let callbackId = activeCallbackId,
+              let call = self.bridge?.savedCall(withID: callbackId) else {
+            return
+        }
+
+        if let clErr = error as? CLError {
+            if clErr.code == .locationUnknown {
+                return
+            } else if clErr.code == .denied {
+                stopUpdatingLocation()
+                return call.reject(
+                    "Permission denied.",
+                    "NOT_AUTHORIZED"
+                )
+            }
+        }
+        return call.reject(error.localizedDescription, nil, error)
+    }
+
+    public func locationManager(
+        _ manager: CLLocationManager,
+        didUpdateLocations locations: [CLLocation]
+    ) {
+        guard let location = locations.last else { return }
+
+        // Always buffer location in background mode
+        if isBackgroundMode {
+            locationBuffer?.insert(location)
+        }
+
+        // Send to JS callback if available
+        if let callbackId = activeCallbackId,
+           let call = self.bridge?.savedCall(withID: callbackId) {
+            if isLocationValid(location) {
+                checkRouteDeviation(location)
+                call.resolve(formatLocation(location))
+            }
+        }
+    }
+
+    public func locationManager(
+        _ manager: CLLocationManager,
+        didChangeAuthorization status: CLAuthorizationStatus
+    ) {
+        if status != .notDetermined {
+            startUpdatingLocation()
+        }
+    }
+
+    // MARK: - Route Deviation
 
     private func toRadians(_ degrees: Double) -> Double {
         return degrees * Double.pi / 180.0
@@ -272,54 +520,36 @@ public class BackgroundGeolocation: CAPPlugin, CLLocationManagerDelegate, CAPBri
     }
 
     private func distancePointToLineSegment(_ point: [Double], _ lineStart: [Double], _ lineEnd: [Double]) -> Double {
-        // Calculate the distances between the three points using Haversine
         let distAB = haversine(point, lineStart)
         let distAC = haversine(point, lineEnd)
         let distBC = haversine(lineStart, lineEnd)
 
-        // Handle the edge case where the line segment is a single point
         if distBC == 0 {
             return distAB
         }
 
-        // Check if the angles at the line segment's endpoints are obtuse.
-        // We use the Law of Cosines (c^2 = a^2 + b^2 - 2ab*cos(C))
-        // If cos(C) < 0, the angle is obtuse.
-
-        // Angle at B (lineStart)
         let epsilon = Double.ulpOfOne
         let cosB = (pow(distAB, 2) + pow(distBC, 2) - pow(distAC, 2)) / (2 * distAB * distBC + epsilon)
         if cosB < 0 {
             return distAB
         }
 
-        // Angle at C (lineEnd)
         let cosC = (pow(distAC, 2) + pow(distBC, 2) - pow(distAB, 2)) / (2 * distAC * distBC + epsilon)
         if cosC < 0 {
             return distAC
         }
 
-        // If both angles are acute, the closest point is on the line segment itself.
-        // We can calculate the distance (height of the triangle) using its area.
-
-        // 1. Calculate the semi-perimeter of the triangle ABC
         let semi = (distAB + distAC + distBC) / 2
-
-        // 2. Calculate the area using Heron's formula
         let area = sqrt(max(0, semi * (semi - distAB) * (semi - distAC) * (semi - distBC)))
-
-        // 3. The distance is the height of the triangle from point A to the base BC
-        // Area = 0.5 * base * height  =>  height = 2 * Area / base
         return (2 * area) / (distBC + epsilon)
     }
 
     private func distancePointToRoute(_ point: [Double]) -> Double {
-        // If the route has less than 2 points, we can't form a segment.
         if plannedRoute.count < 2 {
             if plannedRoute.count == 1 {
                 return haversine(point, plannedRoute[0])
             }
-            return Double.infinity // No line segments to measure against
+            return Double.infinity
         }
 
         var minDistance = Double.infinity
@@ -349,58 +579,7 @@ public class BackgroundGeolocation: CAPPlugin, CLLocationManagerDelegate, CAPBri
         isOffRoute = offRoute
     }
 
-    public func locationManager(
-        _ manager: CLLocationManager,
-        didFailWithError error: Error
-    ) {
-        guard let callbackId = activeCallbackId,
-              let call = self.bridge?.savedCall(withID: callbackId) else {
-            return
-        }
-
-        if let clErr = error as? CLError {
-            if clErr.code == .locationUnknown {
-                // This error is sometimes sent by the manager if
-                // it cannot get a fix immediately.
-                return
-            } else if clErr.code == .denied {
-                stopUpdatingLocation()
-                return call.reject(
-                    "Permission denied.",
-                    "NOT_AUTHORIZED"
-                )
-            }
-        }
-        return call.reject(error.localizedDescription, nil, error)
-    }
-
-    public func locationManager(
-        _ manager: CLLocationManager,
-        didUpdateLocations locations: [CLLocation]
-    ) {
-        guard let location = locations.last,
-              let callbackId = activeCallbackId,
-              let call = self.bridge?.savedCall(withID: callbackId) else {
-            return
-        }
-
-        if isLocationValid(location) {
-            checkRouteDeviation(location)
-            return call.resolve(formatLocation(location))
-        }
-    }
-
-    public func locationManager(
-        _ manager: CLLocationManager,
-        didChangeAuthorization status: CLAuthorizationStatus
-    ) {
-        // If this method is called before the user decides on a permission, as
-        // it is on iOS 14 when the permissions dialog is presented, we ignore
-        // it.
-        if status != .notDetermined {
-            startUpdatingLocation()
-        }
-    }
+    // MARK: - Plugin Version
 
     @objc func getPluginVersion(_ call: CAPPluginCall) {
         call.resolve(["version": self.pluginVersion])

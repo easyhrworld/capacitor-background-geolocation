@@ -2,11 +2,11 @@
 import PackageDescription
 
 let package = Package(
-    name: "CapgoBackgroundGeolocation",
+    name: "EasyhrworldCapacitorBackgroundGeolocation",
     platforms: [.iOS(.v15)],
     products: [
         .library(
-            name: "CapgoBackgroundGeolocation",
+            name: "EasyhrworldCapacitorBackgroundGeolocation",
             targets: ["CapgoBackgroundGeolocationPlugin"])
     ],
     dependencies: [
