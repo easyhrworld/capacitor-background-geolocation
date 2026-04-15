@@ -18,12 +18,12 @@ class HeadlessHttpPoster {
         let effectiveBatchSize = batchSize > 0 ? batchSize : 20
 
         guard !serverUrl.isEmpty, !authToken.isEmpty else {
-            print("[BackgroundGeolocation] Headless posting not configured, skipping")
+            NSLog("[BackgroundGeolocation] Headless posting not configured, skipping")
             return
         }
 
         guard let url = URL(string: serverUrl) else {
-            print("[BackgroundGeolocation] Invalid server URL: \(serverUrl)")
+            NSLog("[BackgroundGeolocation] Invalid server URL: \(serverUrl)")
             return
         }
 
@@ -56,7 +56,7 @@ class HeadlessHttpPoster {
         ]
 
         guard let body = try? JSONSerialization.data(withJSONObject: payload) else {
-            print("[BackgroundGeolocation] Failed to serialize payload")
+            NSLog("[BackgroundGeolocation] Failed to serialize payload")
             return
         }
 
@@ -75,17 +75,17 @@ class HeadlessHttpPoster {
             defer { semaphore.signal() }
 
             if let error = error {
-                print("[BackgroundGeolocation] Headless HTTP post error: \(error.localizedDescription)")
+                NSLog("[BackgroundGeolocation] Headless HTTP post error: \(error.localizedDescription)")
                 return
             }
 
             if let httpResponse = response as? HTTPURLResponse,
                (200..<300).contains(httpResponse.statusCode) {
-                print("[BackgroundGeolocation] Headless post successful: \(batch.count) locations")
+                NSLog("[BackgroundGeolocation] Headless post successful: \(batch.count) locations")
                 success = true
             } else {
                 let code = (response as? HTTPURLResponse)?.statusCode ?? -1
-                print("[BackgroundGeolocation] Headless post failed with HTTP \(code)")
+                NSLog("[BackgroundGeolocation] Headless post failed with HTTP \(code)")
             }
         }
         task.resume()
