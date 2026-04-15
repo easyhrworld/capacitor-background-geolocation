@@ -33,6 +33,7 @@ import com.google.android.gms.location.Priority;
 public class BackgroundGeolocationService extends Service {
 
     static final String ACTION_BROADCAST = (BackgroundGeolocationService.class.getPackage().getName() + ".broadcast");
+    static final String NOTIFICATION_CHANNEL_ID = BackgroundGeolocationService.class.getPackage().getName();
     private final IBinder binder = new LocalBinder();
 
     private static final double EARTH_RADIUS_M = 6371000;
@@ -471,7 +472,7 @@ public class BackgroundGeolocationService extends Service {
 
         // Set the Channel ID for Android O.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            builder.setChannelId(BackgroundGeolocationService.class.getPackage().getName());
+            builder.setChannelId(NOTIFICATION_CHANNEL_ID);
         }
 
         return builder.build();

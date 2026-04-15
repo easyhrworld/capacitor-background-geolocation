@@ -1,8 +1,11 @@
 package com.easyhrworld.capacitor_background_geolocation;
 
 import android.Manifest;
+import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
+import android.media.AudioAttributes;
+import android.provider.Settings;
 import android.content.BroadcastReceiver;
 import android.content.ComponentName;
 import android.content.Context;
@@ -300,20 +303,37 @@ public class BackgroundGeolocation extends Plugin {
         super.load();
 
         // Android O requires a Notification Channel.
+        // Use IMPORTANCE_HIGH + sound so the foreground service notification shows
+        // as a heads-up at the top of the screen (instead of being buried in the
+        // Silent section on Xiaomi MIUI and other OEMs).
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             NotificationManager manager = (NotificationManager) getContext().getSystemService(Context.NOTIFICATION_SERVICE);
+
+            // Delete any previously-created channel so Android re-reads the new settings.
+            // (Channel settings are locked at creation — deletion is the only way to bump importance.)
+            manager.deleteNotificationChannel(BackgroundGeolocationService.NOTIFICATION_CHANNEL_ID);
+
             NotificationChannel channel = new NotificationChannel(
-                BackgroundGeolocationService.class.getPackage().getName(),
+                BackgroundGeolocationService.NOTIFICATION_CHANNEL_ID,
                 BackgroundGeolocationService.getAppString(
                     "capacitor_background_geolocation_notification_channel_name",
-                    "Background Tracking",
+                    "Location Tracking",
                     getContext()
                 ),
-                NotificationManager.IMPORTANCE_DEFAULT
+                NotificationManager.IMPORTANCE_HIGH
             );
+            channel.setDescription("Shown while EasyHR is tracking your location for remote attendance.");
             channel.enableLights(false);
             channel.enableVibration(false);
-            channel.setSound(null, null);
+            channel.setShowBadge(false);
+            channel.setLockscreenVisibility(Notification.VISIBILITY_PUBLIC);
+
+            AudioAttributes audioAttributes = new AudioAttributes.Builder()
+                .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                .setUsage(AudioAttributes.USAGE_NOTIFICATION)
+                .build();
+            channel.setSound(Settings.System.DEFAULT_NOTIFICATION_URI, audioAttributes);
+
             manager.createNotificationChannel(channel);
         }
 
