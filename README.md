@@ -216,6 +216,7 @@ Configuration specific to Android can be made in `strings.xml`:
 * [`configure(...)`](#configure)
 * [`getBufferedLocations()`](#getbufferedlocations)
 * [`clearBufferedLocations()`](#clearbufferedlocations)
+* [`getAuthorizationStatus()`](#getauthorizationstatus)
 * [Interfaces](#interfaces)
 * [Type Aliases](#type-aliases)
 
@@ -342,6 +343,30 @@ clearBufferedLocations() => Promise<void>
 ```
 
 Clear all locally buffered locations.
+
+**Since:** 1.0.0
+
+--------------------
+
+
+### getAuthorizationStatus()
+
+```typescript
+getAuthorizationStatus() => Promise<{ status: 'notDetermined' | 'whenInUse' | 'always' | 'denied' | 'restricted'; }>
+```
+
+Get the current native location authorization status.
+
+- `notDetermined` — user has never been asked (iOS) or permission hasn't been requested (Android)
+- `whenInUse` — user allowed location only while using the app (iOS) / foreground only (Android)
+- `always` — user allowed location all the time (iOS) / background granted (Android)
+- `denied` — user denied location access
+- `restricted` — location is restricted by parental controls or MDM (iOS only)
+
+Use this to detect whether to show an in-app prompt asking the user to upgrade
+from "While Using" to "Always" via Settings.
+
+**Returns:** <code>Promise&lt;{ status: 'notDetermined' | 'whenInUse' | 'always' | 'denied' | 'restricted'; }&gt;</code>
 
 **Since:** 1.0.0
 

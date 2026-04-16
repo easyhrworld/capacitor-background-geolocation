@@ -47,6 +47,7 @@ public class BackgroundGeolocation: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "configure", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "getBufferedLocations", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "clearBufferedLocations", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "getAuthorizationStatus", returnType: CAPPluginReturnPromise),
     ]
 
     private var activeCallbackId: String?
@@ -295,5 +296,29 @@ public class BackgroundGeolocation: CAPPlugin, CAPBridgedPlugin {
 
     @objc func getPluginVersion(_ call: CAPPluginCall) {
         call.resolve(["version": self.pluginVersion])
+    }
+
+    // MARK: - Authorization Status
+
+    @objc func getAuthorizationStatus(_ call: CAPPluginCall) {
+        DispatchQueue.main.async {
+            let manager = CLLocationManager()
+            let status: String
+            switch manager.authorizationStatus {
+            case .notDetermined:
+                status = "notDetermined"
+            case .authorizedWhenInUse:
+                status = "whenInUse"
+            case .authorizedAlways:
+                status = "always"
+            case .denied:
+                status = "denied"
+            case .restricted:
+                status = "restricted"
+            @unknown default:
+                status = "notDetermined"
+            }
+            call.resolve(["status": status])
+        }
     }
 }

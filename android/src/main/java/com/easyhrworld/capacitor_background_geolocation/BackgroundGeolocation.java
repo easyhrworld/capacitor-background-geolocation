@@ -163,6 +163,26 @@ public class BackgroundGeolocation extends Plugin {
     }
 
     @PluginMethod
+    public void getAuthorizationStatus(PluginCall call) {
+        JSObject result = new JSObject();
+        PermissionState fgState = getPermissionState("location");
+        PermissionState bgState = getPermissionState("background_location");
+
+        String status;
+        if (fgState == PermissionState.DENIED) {
+            status = "denied";
+        } else if (fgState != PermissionState.GRANTED) {
+            status = "notDetermined";
+        } else if (bgState == PermissionState.GRANTED) {
+            status = "always";
+        } else {
+            status = "whenInUse";
+        }
+        result.put("status", status);
+        call.resolve(result);
+    }
+
+    @PluginMethod
     public void stop(PluginCall call) {
         // Always connect to the service to stop it — even if serviceConnectionFuture
         // is null (e.g. app was killed and reopened while service was running headless)

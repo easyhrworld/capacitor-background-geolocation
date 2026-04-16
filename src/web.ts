@@ -207,4 +207,19 @@ export class BackgroundGeolocationWeb extends WebPlugin implements BackgroundGeo
   async clearBufferedLocations(): Promise<void> {
     console.warn('BackgroundGeolocation.clearBufferedLocations: not supported on web');
   }
+
+  async getAuthorizationStatus(): Promise<{
+    status: 'notDetermined' | 'whenInUse' | 'always' | 'denied' | 'restricted';
+  }> {
+    if (!navigator.geolocation) return { status: 'denied' };
+    // Browser geolocation has no separate "always" concept — once granted, it works in foreground.
+    try {
+      const perm = await navigator.permissions?.query({ name: 'geolocation' as PermissionName });
+      if (perm?.state === 'granted') return { status: 'always' };
+      if (perm?.state === 'denied') return { status: 'denied' };
+      return { status: 'notDetermined' };
+    } catch {
+      return { status: 'notDetermined' };
+    }
+  }
 }

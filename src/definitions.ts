@@ -303,4 +303,20 @@ export interface BackgroundGeolocationPlugin {
    * @since 1.0.0
    */
   clearBufferedLocations(): Promise<void>;
+
+  /**
+   * Get the current native location authorization status.
+   *
+   * - `notDetermined` — user has never been asked (iOS) or permission hasn't been requested (Android)
+   * - `whenInUse` — user allowed location only while using the app (iOS) / foreground only (Android)
+   * - `always` — user allowed location all the time (iOS) / background granted (Android)
+   * - `denied` — user denied location access
+   * - `restricted` — location is restricted by parental controls or MDM (iOS only)
+   *
+   * Use this to detect whether to show an in-app prompt asking the user to upgrade
+   * from "While Using" to "Always" via Settings.
+   *
+   * @since 1.0.0
+   */
+  getAuthorizationStatus(): Promise<{ status: 'notDetermined' | 'whenInUse' | 'always' | 'denied' | 'restricted' }>;
 }
