@@ -208,6 +208,7 @@ Configuration specific to Android can be made in `strings.xml`:
 
 <docgen-index>
 
+* [`getCurrentLocation()`](#getcurrentlocation)
 * [`start(...)`](#start)
 * [`stop()`](#stop)
 * [`openSettings()`](#opensettings)
@@ -226,6 +227,22 @@ Configuration specific to Android can be made in `strings.xml`:
 <!--Update the source file JSDoc comments and rerun docgen to update the docs below-->
 
 Main plugin interface for background geolocation functionality.
+
+### getCurrentLocation()
+
+```typescript
+getCurrentLocation() => Promise<Location>
+```
+
+Capture one fresh foreground location with OS mock-location evidence.
+Requires foreground location permission; never starts background tracking,
+requests background permission, or adds this fix to the tracking buffer.
+Rejects after 30 seconds if a fresh fix is unavailable.
+
+**Returns:** <code>Promise&lt;<a href="#location">Location</a>&gt;</code>
+
+--------------------
+
 
 ### start(...)
 
@@ -376,6 +393,22 @@ from "While Using" to "Always" via Settings.
 ### Interfaces
 
 
+#### Location
+
+| Prop                     | Type                                                              | Description                                                                     | Since |
+| ------------------------ | ----------------------------------------------------------------- | ------------------------------------------------------------------------------- | ----- |
+| **`latitude`**           | <code>number</code>                                               | Latitude in degrees. Range: -90.0 to +90.0                                      | 7.0.0 |
+| **`longitude`**          | <code>number</code>                                               | Longitude in degrees. Range: -180.0 to +180.0                                   | 7.0.0 |
+| **`accuracy`**           | <code>number</code>                                               | Radius of horizontal uncertainty in metres, with 68% confidence.                | 7.0.0 |
+| **`altitude`**           | <code>number \| null</code>                                       | Metres above sea level (or null if not available).                              | 7.0.0 |
+| **`altitudeAccuracy`**   | <code>number \| null</code>                                       | Vertical uncertainty in metres, with 68% confidence (or null if not available). | 7.0.0 |
+| **`simulated`**          | <code>boolean</code>                                              | `true` if the location was simulated by software, rather than GPS.              | 7.0.0 |
+| **`mockLocationStatus`** | <code><a href="#mocklocationstatus">MockLocationStatus</a></code> | Use this field for security decisions. Older platforms and web report unknown.  |       |
+| **`bearing`**            | <code>number \| null</code>                                       | Deviation from true north in degrees (or null if not available).                | 7.0.0 |
+| **`speed`**              | <code>number \| null</code>                                       | Speed in metres per second (or null if not available).                          | 7.0.0 |
+| **`time`**               | <code>number \| null</code>                                       | Time the location was produced, in milliseconds since the unix epoch.           | 7.0.0 |
+
+
 #### StartOptions
 
 The options for configuring for location updates.
@@ -390,23 +423,6 @@ The options for configuring for location updates.
 | **`stopOnTerminate`**       | <code>boolean</code> | If false, the service will continue running after the app is terminated.                                                                                                                                                                                                                                                                                                                                             | <code>false</code>                 | 1.0.0 |
 | **`startOnBoot`**           | <code>boolean</code> | If true, the service will restart after a device reboot if it was running before the reboot.                                                                                                                                                                                                                                                                                                                         | <code>true</code>                  | 1.0.0 |
 | **`maxTrackingDurationMs`** | <code>number</code>  | Maximum tracking duration in milliseconds. The service will auto-stop after this duration to prevent indefinite battery drain if the user forgets to check out.                                                                                                                                                                                                                                                      | <code>43200000 (12 hours)</code>   | 1.0.0 |
-
-
-#### Location
-
-Represents a geographical location with various attributes.
-
-| Prop                   | Type                        | Description                                                                     | Since |
-| ---------------------- | --------------------------- | ------------------------------------------------------------------------------- | ----- |
-| **`latitude`**         | <code>number</code>         | Latitude in degrees. Range: -90.0 to +90.0                                      | 7.0.0 |
-| **`longitude`**        | <code>number</code>         | Longitude in degrees. Range: -180.0 to +180.0                                   | 7.0.0 |
-| **`accuracy`**         | <code>number</code>         | Radius of horizontal uncertainty in metres, with 68% confidence.                | 7.0.0 |
-| **`altitude`**         | <code>number \| null</code> | Metres above sea level (or null if not available).                              | 7.0.0 |
-| **`altitudeAccuracy`** | <code>number \| null</code> | Vertical uncertainty in metres, with 68% confidence (or null if not available). | 7.0.0 |
-| **`simulated`**        | <code>boolean</code>        | `true` if the location was simulated by software, rather than GPS.              | 7.0.0 |
-| **`bearing`**          | <code>number \| null</code> | Deviation from true north in degrees (or null if not available).                | 7.0.0 |
-| **`speed`**            | <code>number \| null</code> | Speed in metres per second (or null if not available).                          | 7.0.0 |
-| **`time`**             | <code>number \| null</code> | Time the location was produced, in milliseconds since the unix epoch.           | 7.0.0 |
 
 
 #### CallbackError
@@ -447,18 +463,26 @@ batches to a server endpoint without the WebView being alive.
 
 A buffered location record stored locally on the device.
 
-| Prop            | Type                |
-| --------------- | ------------------- |
-| **`lat`**       | <code>number</code> |
-| **`lng`**       | <code>number</code> |
-| **`accuracy`**  | <code>number</code> |
-| **`speed`**     | <code>number</code> |
-| **`bearing`**   | <code>number</code> |
-| **`altitude`**  | <code>number</code> |
-| **`timestamp`** | <code>number</code> |
+| Prop                     | Type                                                              | Description                                                         |
+| ------------------------ | ----------------------------------------------------------------- | ------------------------------------------------------------------- |
+| **`lat`**                | <code>number</code>                                               |                                                                     |
+| **`lng`**                | <code>number</code>                                               |                                                                     |
+| **`accuracy`**           | <code>number</code>                                               |                                                                     |
+| **`speed`**              | <code>number</code>                                               |                                                                     |
+| **`bearing`**            | <code>number</code>                                               |                                                                     |
+| **`altitude`**           | <code>number</code>                                               |                                                                     |
+| **`timestamp`**          | <code>number</code>                                               |                                                                     |
+| **`mockLocationStatus`** | <code><a href="#mocklocationstatus">MockLocationStatus</a></code> | OS-reported evidence; absent on records captured by older versions. |
 
 
 ### Type Aliases
+
+
+#### MockLocationStatus
+
+A negative OS signal is not proof that coordinates are genuine.
+
+<code>'mocked' | 'not_detected' | 'unknown'</code>
 
 
 #### Record

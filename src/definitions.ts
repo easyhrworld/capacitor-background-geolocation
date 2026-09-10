@@ -65,6 +65,8 @@ export interface BufferedLocation {
   bearing: number;
   altitude: number;
   timestamp: number;
+  /** OS-reported evidence; absent on records captured by older versions. */
+  mockLocationStatus?: MockLocationStatus;
 }
 
 /**
@@ -150,6 +152,9 @@ export interface StartOptions {
  *
  * @since 7.0.0
  */
+/** A negative OS signal is not proof that coordinates are genuine. */
+export type MockLocationStatus = 'mocked' | 'not_detected' | 'unknown';
+
 export interface Location {
   /**
    * Latitude in degrees. Range: -90.0 to +90.0
@@ -187,6 +192,8 @@ export interface Location {
    * @since 7.0.0
    */
   simulated: boolean;
+  /** Use this field for security decisions. Older platforms and web report unknown. */
+  mockLocationStatus?: MockLocationStatus;
   /**
    * Deviation from true north in degrees (or null if not available).
    *
@@ -247,6 +254,14 @@ export interface SetPlannedRouteOptions {
  * @since 7.0.0
  */
 export interface BackgroundGeolocationPlugin {
+  /**
+   * Capture one fresh foreground location with OS mock-location evidence.
+   * Requires foreground location permission; never starts background tracking,
+   * requests background permission, or adds this fix to the tracking buffer.
+   * Rejects after 30 seconds if a fresh fix is unavailable.
+   */
+  getCurrentLocation(): Promise<Location>;
+
   /**
    * Start listening for location changes. The callback is invoked
    * each time a new location is available.

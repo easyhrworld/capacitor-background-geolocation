@@ -26,10 +26,10 @@ public class BackgroundGeolocationUnitTest {
     public void testPackageStructure() {
         // Verify main classes exist
         try {
-            Class<?> pluginClass = Class.forName("com.capgo.capacitor_background_geolocation.BackgroundGeolocation");
+            Class<?> pluginClass = Class.forName("com.easyhrworld.capacitor_background_geolocation.BackgroundGeolocation");
             assertNotNull("BackgroundGeolocation plugin class should exist", pluginClass);
 
-            Class<?> serviceClass = Class.forName("com.capgo.capacitor_background_geolocation.BackgroundGeolocationService");
+            Class<?> serviceClass = Class.forName("com.easyhrworld.capacitor_background_geolocation.BackgroundGeolocationService");
             assertNotNull("BackgroundGeolocationService class should exist", serviceClass);
         } catch (ClassNotFoundException e) {
             fail("Plugin classes should exist: " + e.getMessage());

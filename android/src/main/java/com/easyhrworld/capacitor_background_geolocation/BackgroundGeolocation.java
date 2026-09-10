@@ -4,8 +4,6 @@ import android.Manifest;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
-import android.media.AudioAttributes;
-import android.provider.Settings;
 import android.content.BroadcastReceiver;
 import android.content.ComponentName;
 import android.content.Context;
@@ -15,9 +13,11 @@ import android.content.ServiceConnection;
 import android.content.SharedPreferences;
 import android.location.Location;
 import android.location.LocationManager;
+import android.media.AudioAttributes;
 import android.net.Uri;
 import android.os.Build;
 import android.os.IBinder;
+import android.provider.Settings;
 import android.provider.Settings;
 import androidx.annotation.Nullable;
 import androidx.localbroadcastmanager.content.LocalBroadcastManager;
@@ -31,7 +31,10 @@ import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
 import com.getcapacitor.annotation.Permission;
 import com.getcapacitor.annotation.PermissionCallback;
+import com.google.android.gms.location.CurrentLocationRequest;
 import com.google.android.gms.location.LocationServices;
+import com.google.android.gms.location.Priority;
+import com.google.android.gms.tasks.CancellationTokenSource;
 import java.util.concurrent.CompletableFuture;
 import org.json.JSONArray;
 import org.json.JSONException;
@@ -63,6 +66,40 @@ public class BackgroundGeolocation extends Plugin {
                     }
                 });
         } catch (SecurityException ignore) {}
+    }
+
+    @PluginMethod
+    public void getCurrentLocation(PluginCall call) {
+        if (getPermissionState("location") != PermissionState.GRANTED) {
+            call.reject("Foreground location permission is required", "NOT_AUTHORIZED");
+            return;
+        }
+        if (!isLocationEnabled(getContext())) {
+            call.reject("Location services are disabled", "NOT_AUTHORIZED");
+            return;
+        }
+        CancellationTokenSource cancellation = new CancellationTokenSource();
+        CurrentLocationRequest request = new CurrentLocationRequest.Builder()
+            .setPriority(Priority.PRIORITY_HIGH_ACCURACY)
+            .setMaxUpdateAgeMillis(0)
+            .setDurationMillis(30000)
+            .build();
+        try {
+            LocationServices.getFusedLocationProviderClient(getContext())
+                .getCurrentLocation(request, cancellation.getToken())
+                .addOnSuccessListener((location) -> {
+                    if (location == null) {
+                        call.reject("A fresh location was not available. Please retry.", "TIMEOUT");
+                    } else {
+                        call.resolve(formatLocation(location));
+                    }
+                })
+                .addOnFailureListener((error) -> call.reject("Could not capture location", "LOCATION_ERROR", error))
+                .addOnCompleteListener((task) -> cancellation.cancel());
+        } catch (SecurityException error) {
+            cancellation.cancel();
+            call.reject("Foreground location permission is required", "NOT_AUTHORIZED", error);
+        }
     }
 
     @PluginMethod(returnType = PluginMethod.RETURN_CALLBACK)
@@ -292,7 +329,8 @@ public class BackgroundGeolocation extends Plugin {
         // In addition to mocking locations in development, Android allows the
         // installation of apps which have the power to simulate location
         // readings in other apps.
-        obj.put("simulated", location.isFromMockProvider());
+        obj.put("simulated", LocationEvidence.isMocked(location));
+        obj.put("mockLocationStatus", LocationEvidence.status(location));
         obj.put("speed", location.hasSpeed() ? location.getSpeed() : JSONObject.NULL);
         obj.put("bearing", location.hasBearing() ? location.getBearing() : JSONObject.NULL);
         obj.put("time", location.getTime());
@@ -427,7 +465,8 @@ public class BackgroundGeolocation extends Plugin {
         int postIntervalMs = call.getInt("postIntervalMs", 60000);
 
         SharedPreferences prefs = getContext().getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-        prefs.edit()
+        prefs
+            .edit()
             .putString("headless_server_url", serverUrl)
             .putString("headless_auth_token", authToken)
             .putString("headless_employee_id", employeeId)

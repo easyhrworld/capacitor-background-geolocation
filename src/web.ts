@@ -47,6 +47,7 @@ export class BackgroundGeolocationWeb extends WebPlugin implements BackgroundGeo
           altitude: position.coords.altitude,
           altitudeAccuracy: position.coords.altitudeAccuracy,
           simulated: false,
+          mockLocationStatus: 'unknown',
           bearing: position.coords.heading,
           speed: position.coords.speed,
           time: position.timestamp,
@@ -75,6 +76,10 @@ export class BackgroundGeolocationWeb extends WebPlugin implements BackgroundGeo
         maximumAge: options.stale ? 300000 : 0,
       },
     );
+  }
+
+  async getCurrentLocation(): Promise<Location> {
+    throw this.unavailable('Native location verification is unavailable in a browser');
   }
 
   async stop(): Promise<void> {

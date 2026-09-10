@@ -22,6 +22,7 @@ func formatLocation(_ location: CLLocation) -> PluginCallResultData {
         "altitude": location.altitude,
         "altitudeAccuracy": location.verticalAccuracy,
         "simulated": simulated,
+        "mockLocationStatus": locationEvidenceStatus(location),
         "speed": location.speed < 0 ? null : location.speed,
         "bearing": location.course < 0 ? null : location.course,
         "time": NSNumber(
@@ -39,6 +40,7 @@ public class BackgroundGeolocation: CAPPlugin, CAPBridgedPlugin {
     public let identifier = "BackgroundGeolocationPlugin"
     public let jsName = "BackgroundGeolocation"
     public let pluginMethods: [CAPPluginMethod] = [
+        CAPPluginMethod(name: "getCurrentLocation", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "start", returnType: CAPPluginReturnCallback),
         CAPPluginMethod(name: "stop", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "openSettings", returnType: CAPPluginReturnPromise),
@@ -50,6 +52,7 @@ public class BackgroundGeolocation: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "getAuthorizationStatus", returnType: CAPPluginReturnPromise),
     ]
 
+    private var locationSnapshots: [String: LocationSnapshot] = [:]
     private var activeCallbackId: String?
     private var allowStale: Bool = false
     private var created: Date?
@@ -65,6 +68,20 @@ public class BackgroundGeolocation: CAPPlugin, CAPBridgedPlugin {
         UIDevice.current.isBatteryMonitoringEnabled = true
         // Restore tracking if app was relaunched by significant location change
         LocationTracker.shared.restoreIfNeeded()
+    }
+
+    @objc func getCurrentLocation(_ call: CAPPluginCall) {
+        DispatchQueue.main.async {
+            let snapshot = LocationSnapshot { [weak self] result in
+                self?.locationSnapshots.removeValue(forKey: call.callbackId)
+                switch result {
+                case .success(let location): call.resolve(formatLocation(location))
+                case .failure(let error): call.reject(error.localizedDescription, "LOCATION_ERROR")
+                }
+            }
+            self.locationSnapshots[call.callbackId] = snapshot
+            snapshot.start()
+        }
     }
 
     // MARK: - Start / Stop
@@ -139,6 +156,8 @@ public class BackgroundGeolocation: CAPPlugin, CAPBridgedPlugin {
 
     @objc func configure(_ call: CAPPluginCall) {
         let defaults = UserDefaults.standard
+        objc_sync_enter(defaults)
+        defer { objc_sync_exit(defaults) }
         let prefix = "bg_geo_"
 
         if let serverUrl = call.getString("serverUrl") {
