@@ -1,16 +1,16 @@
 package com.easyhrworld.capacitor_background_geolocation;
 
 import android.Manifest;
+import android.app.ForegroundServiceStartNotAllowedException;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
-import android.content.BroadcastReceiver;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
-import android.content.IntentFilter;
 import android.content.ServiceConnection;
 import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
 import android.location.Location;
 import android.location.LocationManager;
 import android.media.AudioAttributes;
@@ -18,9 +18,8 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.IBinder;
 import android.provider.Settings;
-import android.provider.Settings;
-import androidx.annotation.Nullable;
-import androidx.localbroadcastmanager.content.LocalBroadcastManager;
+import androidx.core.content.ContextCompat;
+import androidx.core.location.LocationManagerCompat;
 import com.getcapacitor.JSArray;
 import com.getcapacitor.JSObject;
 import com.getcapacitor.Logger;
@@ -32,9 +31,19 @@ import com.getcapacitor.annotation.CapacitorPlugin;
 import com.getcapacitor.annotation.Permission;
 import com.getcapacitor.annotation.PermissionCallback;
 import com.google.android.gms.location.CurrentLocationRequest;
+import com.google.android.gms.location.Geofence;
+import com.google.android.gms.location.GeofencingClient;
+import com.google.android.gms.location.GeofencingRequest;
 import com.google.android.gms.location.LocationServices;
 import com.google.android.gms.location.Priority;
 import com.google.android.gms.tasks.CancellationTokenSource;
+import java.net.URL;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import org.json.JSONArray;
 import org.json.JSONException;
@@ -44,17 +53,19 @@ import org.json.JSONObject;
     name = "BackgroundGeolocation",
     permissions = {
         @Permission(strings = { Manifest.permission.ACCESS_COARSE_LOCATION, Manifest.permission.ACCESS_FINE_LOCATION }, alias = "location"),
-        @Permission(strings = { Manifest.permission.ACCESS_BACKGROUND_LOCATION }, alias = "background_location"),
+        @Permission(strings = { Manifest.permission.ACCESS_BACKGROUND_LOCATION }, alias = "backgroundLocation"),
         @Permission(strings = { Manifest.permission.POST_NOTIFICATIONS }, alias = "notification")
     }
 )
 public class BackgroundGeolocation extends Plugin {
 
     private static final String PREFS_NAME = "bg_geo_prefs";
-    private final String pluginVersion = "1.0.0";
+    private final String pluginVersion = "8.4.5";
 
     private CompletableFuture<BackgroundGeolocationService.LocalBinder> serviceConnectionFuture;
+    private ServiceConnection serviceConnection;
     private CompletableFuture<Void> locationPermissionFuture;
+    private CompletableFuture<Void> geofencePermissionFuture;
 
     private void fetchLastLocation(PluginCall call) {
         try {
@@ -142,14 +153,49 @@ public class BackgroundGeolocation extends Plugin {
         if (call.getBoolean("stale", false)) {
             fetchLastLocation(call);
         }
-        getServiceConnection().thenAccept((serviceBinder) -> {
-            serviceBinder.start(
-                call.getCallbackId(),
-                call.getString("backgroundTitle", "Using your location"),
-                call.getString("backgroundMessage", ""),
-                call.getFloat("distanceFilter", 0f)
-            );
-        });
+        CompletableFuture<BackgroundGeolocationService.LocalBinder> connectionFuture = getServiceConnection();
+        connectionFuture
+            .thenAccept((serviceBinder) -> {
+                serviceBinder.start(
+                    call.getCallbackId(),
+                    call.getString("backgroundTitle", "Using your location"),
+                    call.getString("backgroundMessage", ""),
+                    call.getFloat("distanceFilter", 0f),
+                    call.getString("url", null),
+                    headersFromCall(call),
+                    longOptionFromCall(call, "minIntervalMs", 0L),
+                    call.getBoolean("networkFallback", false)
+                );
+            })
+            .exceptionally((throwable) -> {
+                if (serviceConnectionFuture == connectionFuture) {
+                    releaseServiceConnection();
+                    stopBackgroundService();
+                    serviceConnectionFuture = null;
+                }
+                rejectServiceStartFailure(call, throwable);
+                return null;
+            });
+    }
+
+    @PluginMethod
+    public void updateHeaders(PluginCall call) {
+        Map<String, String> headers = headersFromObject(call.getObject("headers", new JSObject()));
+        LocationStore.saveHeaders(getContext(), headers);
+        GeofenceStore.saveHeaders(getContext(), headers);
+        if (serviceConnectionFuture != null) {
+            getServiceConnection()
+                .thenAccept((serviceBinder) -> {
+                    serviceBinder.updateHeaders(headers);
+                    call.resolve();
+                })
+                .exceptionally((throwable) -> {
+                    call.reject("Failed to update headers: " + throwable.getMessage());
+                    return null;
+                });
+            return;
+        }
+        call.resolve();
     }
 
     private CompletableFuture<Void> requestLocationPermissions(PluginCall call) {
@@ -175,7 +221,7 @@ public class BackgroundGeolocation extends Plugin {
 
         // Request background location permission (Android 10+) after foreground is granted
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            requestPermissionForAlias("background_location", call, "backgroundLocationPermissionsCallback");
+            requestPermissionForAlias("backgroundLocation", call, "backgroundLocationPermissionsCallback");
         } else {
             requestPermissionForAlias("notification", call, "notificationPermissionsCallback");
             locationPermissionFuture.complete(null);
@@ -200,17 +246,138 @@ public class BackgroundGeolocation extends Plugin {
     }
 
     @PluginMethod
+    @Override
+    public void checkPermissions(PluginCall call) {
+        call.resolve(buildPermissionStatus());
+    }
+
+    @PluginMethod
+    @Override
+    public void requestPermissions(PluginCall call) {
+        Set<String> permissions = parseRequestedPermissions(call);
+        if (!permissions.contains("location") && !permissions.contains("backgroundLocation") && !permissions.contains("notification")) {
+            call.resolve(buildPermissionStatus());
+            return;
+        }
+        continuePermissionRequest(call, permissions);
+    }
+
+    @PermissionCallback
+    private void generalLocationPermissionsCallback(PluginCall call) {
+        Set<String> permissions = parseRequestedPermissions(call);
+        permissions.remove("location");
+        continuePermissionRequest(call, permissions);
+    }
+
+    @PermissionCallback
+    private void generalBackgroundPermissionsCallback(PluginCall call) {
+        Set<String> permissions = parseRequestedPermissions(call);
+        permissions.remove("location");
+        permissions.remove("backgroundLocation");
+        continuePermissionRequest(call, permissions);
+    }
+
+    @PermissionCallback
+    private void generalNotificationPermissionsCallback(PluginCall call) {
+        call.resolve(buildPermissionStatus());
+    }
+
+    private void continuePermissionRequest(PluginCall call, Set<String> permissions) {
+        if (permissions.contains("location") && getPermissionState("location") != PermissionState.GRANTED) {
+            requestPermissionForAlias("location", call, "generalLocationPermissionsCallback");
+            return;
+        }
+        if (
+            permissions.contains("backgroundLocation") &&
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
+            getPermissionState("location") == PermissionState.GRANTED &&
+            getPermissionState("backgroundLocation") != PermissionState.GRANTED
+        ) {
+            requestPermissionForAlias("backgroundLocation", call, "generalBackgroundPermissionsCallback");
+            return;
+        }
+        if (
+            permissions.contains("notification") &&
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            getPermissionState("notification") != PermissionState.GRANTED
+        ) {
+            requestPermissionForAlias("notification", call, "generalNotificationPermissionsCallback");
+            return;
+        }
+        call.resolve(buildPermissionStatus());
+    }
+
+    private Set<String> parseRequestedPermissions(PluginCall call) {
+        JSArray permissionsArray = call.getArray("permissions");
+        Set<String> permissions = new HashSet<>();
+        if (permissionsArray == null) {
+            permissions.add("location");
+            permissions.add("backgroundLocation");
+            permissions.add("notification");
+            return permissions;
+        }
+        try {
+            for (int i = 0; i < permissionsArray.length(); i++) {
+                String permission = permissionsArray.getString(i);
+                if (permission != null && !permission.isEmpty()) {
+                    permissions.add(permission);
+                }
+            }
+        } catch (JSONException exception) {
+            Logger.error("Could not parse permissions array", exception);
+        }
+        if (permissions.isEmpty()) {
+            permissions.add("location");
+            permissions.add("backgroundLocation");
+            permissions.add("notification");
+        }
+        return permissions;
+    }
+
+    private JSObject buildPermissionStatus() {
+        JSObject ret = new JSObject();
+        ret.put("location", permissionStateValue(getPermissionState("location")));
+        ret.put("backgroundLocation", getBackgroundLocationPermissionState());
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            ret.put("notification", permissionStateValue(getPermissionState("notification")));
+        } else {
+            ret.put("notification", "granted");
+        }
+        return ret;
+    }
+
+    private String getBackgroundLocationPermissionState() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            return permissionStateValue(getPermissionState("location"));
+        }
+        return permissionStateValue(getPermissionState("backgroundLocation"));
+    }
+
+    private String permissionStateValue(PermissionState state) {
+        switch (state) {
+            case GRANTED:
+                return "granted";
+            case DENIED:
+                return "denied";
+            case PROMPT:
+            case PROMPT_WITH_RATIONALE:
+            default:
+                return "prompt";
+        }
+    }
+
+    @PluginMethod
     public void getAuthorizationStatus(PluginCall call) {
         JSObject result = new JSObject();
         PermissionState fgState = getPermissionState("location");
-        PermissionState bgState = getPermissionState("background_location");
+        PermissionState bgState = getPermissionState("backgroundLocation");
 
         String status;
         if (fgState == PermissionState.DENIED) {
             status = "denied";
         } else if (fgState != PermissionState.GRANTED) {
             status = "notDetermined";
-        } else if (bgState == PermissionState.GRANTED) {
+        } else if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q || bgState == PermissionState.GRANTED) {
             status = "always";
         } else {
             status = "whenInUse";
@@ -233,6 +400,7 @@ public class BackgroundGeolocation extends Plugin {
                     }
                 }
                 call.resolve();
+                releaseServiceConnection();
                 serviceConnectionFuture = null;
             })
             .exceptionally((throwable) -> {
@@ -277,6 +445,253 @@ public class BackgroundGeolocation extends Plugin {
         }
     }
 
+    @PluginMethod
+    public void setupGeofencing(PluginCall call) {
+        String url = call.getString("url");
+        if (url != null && !url.isEmpty()) {
+            try {
+                URL urlObject = new URL(url);
+                String protocol = urlObject.getProtocol();
+                if (!"http".equalsIgnoreCase(protocol) && !"https".equalsIgnoreCase(protocol)) {
+                    call.reject("Given url is not valid");
+                    return;
+                }
+            } catch (Exception exception) {
+                call.reject("Given url is not valid");
+                return;
+            }
+        }
+
+        JSObject payload = call.getObject("payload", new JSObject());
+        boolean backgroundLocation = call.getBoolean("backgroundLocation", false);
+        GeofenceStore.saveSetup(
+            getContext(),
+            url,
+            call.getBoolean("notifyOnEntry", true),
+            call.getBoolean("notifyOnExit", true),
+            payload,
+            backgroundLocation,
+            headersFromCall(call)
+        );
+
+        if (!call.getBoolean("requestPermissions", true)) {
+            call.resolve();
+            return;
+        }
+
+        requestGeofencePermissions(call, backgroundLocation)
+            .thenRun(call::resolve)
+            .exceptionally((throwable) -> {
+                call.reject(geofencePermissionMessage(backgroundLocation), "NOT_AUTHORIZED");
+                return null;
+            });
+    }
+
+    @PluginMethod
+    public void addGeofence(PluginCall call) {
+        boolean backgroundLocation = GeofenceStore.getBackgroundLocation(getContext());
+        if (!hasGeofencePermissions(backgroundLocation)) {
+            call.reject(geofencePermissionMessage(backgroundLocation), "NOT_AUTHORIZED");
+            return;
+        }
+        if (!isLocationEnabled(getContext())) {
+            call.reject("Location services disabled.", "NOT_AUTHORIZED");
+            return;
+        }
+
+        Double latitude = call.getDouble("latitude");
+        Double longitude = call.getDouble("longitude");
+        String identifier = call.getString("identifier");
+        double radius = call.getDouble("radius", 50.0);
+        if (identifier == null || identifier.isEmpty()) {
+            call.reject("Identifier is required");
+            return;
+        }
+        if (latitude == null || latitude < -90 || latitude > 90) {
+            call.reject("Latitude must be between -90 and 90");
+            return;
+        }
+        if (longitude == null || longitude < -180 || longitude > 180) {
+            call.reject("Longitude must be between -180 and 180");
+            return;
+        }
+        if (radius <= 0) {
+            call.reject("Radius must be greater than 0");
+            return;
+        }
+
+        boolean notifyOnEntry = call.getBoolean("notifyOnEntry", GeofenceStore.getNotifyOnEntry(getContext()));
+        boolean notifyOnExit = call.getBoolean("notifyOnExit", GeofenceStore.getNotifyOnExit(getContext()));
+        int transitionTypes = 0;
+        int initialTrigger = 0;
+        if (notifyOnEntry) {
+            transitionTypes |= Geofence.GEOFENCE_TRANSITION_ENTER;
+            initialTrigger |= GeofencingRequest.INITIAL_TRIGGER_ENTER;
+        }
+        if (notifyOnExit) {
+            transitionTypes |= Geofence.GEOFENCE_TRANSITION_EXIT;
+        }
+        if (transitionTypes == 0) {
+            call.reject("At least one transition must be enabled");
+            return;
+        }
+
+        JSObject payload = call.getObject("payload", new JSObject());
+        Geofence geofence = new Geofence.Builder()
+            .setRequestId(identifier)
+            .setCircularRegion(latitude, longitude, (float) radius)
+            .setTransitionTypes(transitionTypes)
+            .setExpirationDuration(Geofence.NEVER_EXPIRE)
+            .build();
+        GeofencingRequest request = new GeofencingRequest.Builder().setInitialTrigger(initialTrigger).addGeofence(geofence).build();
+
+        try {
+            getGeofencingClient()
+                .addGeofences(request, getGeofencePendingIntent())
+                .addOnSuccessListener((unused) -> {
+                    try {
+                        GeofenceStore.saveRegion(
+                            getContext(),
+                            identifier,
+                            latitude,
+                            longitude,
+                            (float) radius,
+                            notifyOnEntry,
+                            notifyOnExit,
+                            payload
+                        );
+                        call.resolve();
+                    } catch (JSONException exception) {
+                        call.reject("Could not persist geofence", exception);
+                    }
+                })
+                .addOnFailureListener((exception) -> call.reject("Could not start monitoring the geofence", exception));
+        } catch (SecurityException exception) {
+            call.reject(geofencePermissionMessage(backgroundLocation), "NOT_AUTHORIZED", exception);
+        }
+    }
+
+    @PluginMethod
+    public void removeGeofence(PluginCall call) {
+        String identifier = call.getString("identifier");
+        if (identifier == null || identifier.isEmpty()) {
+            call.reject("Identifier is required");
+            return;
+        }
+        getGeofencingClient()
+            .removeGeofences(Collections.singletonList(identifier))
+            .addOnSuccessListener((unused) -> {
+                GeofenceStore.removeRegion(getContext(), identifier);
+                call.resolve();
+            })
+            .addOnFailureListener((exception) -> call.reject("Could not stop monitoring the geofence", exception));
+    }
+
+    @PluginMethod
+    public void removeAllGeofences(PluginCall call) {
+        getGeofencingClient()
+            .removeGeofences(getGeofencePendingIntent())
+            .addOnSuccessListener((unused) -> {
+                GeofenceStore.clearRegions(getContext());
+                call.resolve();
+            })
+            .addOnFailureListener((exception) -> call.reject("Could not stop monitoring geofences", exception));
+    }
+
+    @PluginMethod
+    public void getMonitoredGeofences(PluginCall call) {
+        JSObject result = new JSObject();
+        Set<String> regionIds = GeofenceStore.getRegionIds(getContext());
+        JSArray regions = new JSArray();
+        for (String regionId : regionIds) {
+            regions.put(regionId);
+        }
+        result.put("regions", regions);
+        call.resolve(result);
+    }
+
+    private CompletableFuture<Void> requestGeofencePermissions(PluginCall call, boolean backgroundLocation) {
+        if (hasGeofencePermissions(backgroundLocation)) {
+            return CompletableFuture.completedFuture(null);
+        }
+        if (geofencePermissionFuture != null) {
+            return geofencePermissionFuture;
+        }
+        CompletableFuture<Void> future = new CompletableFuture<>();
+        geofencePermissionFuture = future;
+        if (getPermissionState("location") != PermissionState.GRANTED) {
+            requestPermissionForAlias("location", call, "geofenceLocationPermissionsCallback");
+            return future;
+        }
+        requestBackgroundLocationPermissionIfNeeded(call, backgroundLocation);
+        return future;
+    }
+
+    @PermissionCallback
+    private void geofenceLocationPermissionsCallback(PluginCall call) {
+        if (geofencePermissionFuture == null) {
+            return;
+        }
+        if (getPermissionState("location") != PermissionState.GRANTED) {
+            geofencePermissionFuture.completeExceptionally(new SecurityException("User denied location permission"));
+            geofencePermissionFuture = null;
+            return;
+        }
+        requestBackgroundLocationPermissionIfNeeded(call, GeofenceStore.getBackgroundLocation(getContext()));
+    }
+
+    @PermissionCallback
+    private void geofenceBackgroundPermissionsCallback(PluginCall call) {
+        if (geofencePermissionFuture == null) {
+            return;
+        }
+        if (!hasBackgroundLocationPermission()) {
+            geofencePermissionFuture.completeExceptionally(new SecurityException("User denied background location permission"));
+            geofencePermissionFuture = null;
+            return;
+        }
+        geofencePermissionFuture.complete(null);
+        geofencePermissionFuture = null;
+    }
+
+    private void requestBackgroundLocationPermissionIfNeeded(PluginCall call, boolean backgroundLocation) {
+        if (!backgroundLocation || hasBackgroundLocationPermission()) {
+            geofencePermissionFuture.complete(null);
+            geofencePermissionFuture = null;
+            return;
+        }
+        requestPermissionForAlias("backgroundLocation", call, "geofenceBackgroundPermissionsCallback");
+    }
+
+    private boolean hasGeofencePermissions(boolean backgroundLocation) {
+        return getPermissionState("location") == PermissionState.GRANTED && (!backgroundLocation || hasBackgroundLocationPermission());
+    }
+
+    private boolean hasBackgroundLocationPermission() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            return true;
+        }
+        return (
+            ContextCompat.checkSelfPermission(getContext(), Manifest.permission.ACCESS_BACKGROUND_LOCATION) ==
+            PackageManager.PERMISSION_GRANTED
+        );
+    }
+
+    private String geofencePermissionMessage(boolean backgroundLocation) {
+        if (backgroundLocation) {
+            return "Background location permission is required for geofencing";
+        }
+        return "Location permission is required for geofencing";
+    }
+
+    private GeofencingClient getGeofencingClient() {
+        return LocationServices.getGeofencingClient(getContext());
+    }
+
+    private android.app.PendingIntent getGeofencePendingIntent() {
+        return GeofenceBroadcastReceiver.createPendingIntent(getContext());
+    }
+
     private static double[][] getJavaDoubleArray(JSArray jsArray) throws JSONException {
         int rows = jsArray.length();
         if (rows == 0) {
@@ -302,15 +717,35 @@ public class BackgroundGeolocation extends Plugin {
 
     // Checks if device-wide location services are disabled
     private static Boolean isLocationEnabled(Context context) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            LocationManager lm = (LocationManager) context.getSystemService(Context.LOCATION_SERVICE);
-            return lm != null && lm.isLocationEnabled();
-        } else {
-            return (
-                Settings.Secure.getInt(context.getContentResolver(), Settings.Secure.LOCATION_MODE, Settings.Secure.LOCATION_MODE_OFF) !=
-                Settings.Secure.LOCATION_MODE_OFF
-            );
+        LocationManager lm = (LocationManager) context.getSystemService(Context.LOCATION_SERVICE);
+        return lm != null && LocationManagerCompat.isLocationEnabled(lm);
+    }
+
+    // Capacitor's PluginCall.getLong() only reads Java Long values. JS numbers that
+    // fit in 32 bits cross the bridge as Integer, so optLong is required (issue #62).
+    static long longOptionFromCall(PluginCall call, String key, long defaultValue) {
+        return call.getData().optLong(key, defaultValue);
+    }
+
+    private static Map<String, String> headersFromCall(PluginCall call) {
+        return headersFromObject(call.getObject("headers"));
+    }
+
+    private static Map<String, String> headersFromObject(JSObject headers) {
+        Map<String, String> result = new HashMap<>();
+        if (headers == null) {
+            return result;
         }
+        Iterator<String> keys = headers.keys();
+        while (keys.hasNext()) {
+            String key = keys.next();
+            Object value = headers.opt(key);
+            if (value == null || value == JSONObject.NULL) {
+                continue;
+            }
+            result.put(key, String.valueOf(value));
+        }
+        return result;
     }
 
     private static JSObject formatLocation(Location location) {
@@ -337,22 +772,37 @@ public class BackgroundGeolocation extends Plugin {
         return obj;
     }
 
-    // Receives messages from the service.
-    private class ServiceReceiver extends BroadcastReceiver {
-
+    // Receives messages from the service and the geofence broadcast receiver.
+    private final LocalEvents.Listener localEventListener = new LocalEvents.Listener() {
         @Override
-        public void onReceive(Context context, Intent intent) {
-            String id = intent.getStringExtra("id");
-            PluginCall call = getBridge().getSavedCall(id);
+        public void onLocation(String callbackId, Location location) {
+            if (callbackId == null) return;
+            PluginCall call = getBridge().getSavedCall(callbackId);
             if (call == null) {
                 return;
             }
-            Location location = intent.getParcelableExtra("location");
-            if (location != null) {
-                call.resolve(formatLocation(location));
-            } else {
-                Logger.debug("No locations received");
-            }
+            call.resolve(formatLocation(location));
+        }
+
+        @Override
+        public void onGeofenceTransition(String payload) {
+            notifyGeofenceListeners("geofenceTransition", payload);
+        }
+
+        @Override
+        public void onGeofenceError(String payload) {
+            notifyGeofenceListeners("geofenceError", payload);
+        }
+    };
+
+    private void notifyGeofenceListeners(String eventName, String payload) {
+        if (payload == null || payload.isEmpty()) {
+            return;
+        }
+        try {
+            notifyListeners(eventName, GeofenceStore.toJSObject(new JSONObject(payload)), true);
+        } catch (JSONException exception) {
+            Logger.error("Could not parse geofence payload", exception);
         }
     }
 
@@ -366,10 +816,6 @@ public class BackgroundGeolocation extends Plugin {
         // Silent section on Xiaomi MIUI and other OEMs).
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             NotificationManager manager = (NotificationManager) getContext().getSystemService(Context.NOTIFICATION_SERVICE);
-
-            // Delete any previously-created channel so Android re-reads the new settings.
-            // (Channel settings are locked at creation — deletion is the only way to bump importance.)
-            manager.deleteNotificationChannel(BackgroundGeolocationService.NOTIFICATION_CHANNEL_ID);
 
             NotificationChannel channel = new NotificationChannel(
                 BackgroundGeolocationService.NOTIFICATION_CHANNEL_ID,
@@ -395,10 +841,7 @@ public class BackgroundGeolocation extends Plugin {
             manager.createNotificationChannel(channel);
         }
 
-        LocalBroadcastManager.getInstance(this.getContext()).registerReceiver(
-            new ServiceReceiver(),
-            new IntentFilter(BackgroundGeolocationService.ACTION_BROADCAST)
-        );
+        LocalEvents.addListener(localEventListener);
     }
 
     private CompletableFuture<BackgroundGeolocationService.LocalBinder> getServiceConnection() {
@@ -406,32 +849,116 @@ public class BackgroundGeolocation extends Plugin {
             return serviceConnectionFuture;
         }
 
-        serviceConnectionFuture = new CompletableFuture<>();
+        CompletableFuture<BackgroundGeolocationService.LocalBinder> connectionFuture = new CompletableFuture<>();
+        serviceConnectionFuture = connectionFuture;
 
-        Intent serviceIntent = new Intent(this.getContext(), BackgroundGeolocationService.class);
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            this.getContext().startForegroundService(serviceIntent);
-        } else {
-            this.getContext().startService(serviceIntent);
+        Intent serviceIntent = createServiceIntent();
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                this.getContext().startForegroundService(serviceIntent);
+            } else {
+                this.getContext().startService(serviceIntent);
+            }
+        } catch (RuntimeException exception) {
+            connectionFuture.completeExceptionally(exception);
+            serviceConnectionFuture = null;
+            return connectionFuture;
         }
 
-        this.getContext().bindService(
-            serviceIntent,
-            new ServiceConnection() {
-                @Override
-                public void onServiceConnected(ComponentName name, IBinder binder) {
-                    serviceConnectionFuture.complete((BackgroundGeolocationService.LocalBinder) binder);
-                }
+        ServiceConnection connection = new ServiceConnection() {
+            @Override
+            public void onServiceConnected(ComponentName name, IBinder binder) {
+                connectionFuture.complete((BackgroundGeolocationService.LocalBinder) binder);
+            }
 
-                @Override
-                public void onServiceDisconnected(ComponentName name) {
+            @Override
+            public void onServiceDisconnected(ComponentName name) {
+                if (serviceConnectionFuture == connectionFuture) {
+                    serviceConnection = null;
                     serviceConnectionFuture = null;
                 }
-            },
-            Context.BIND_AUTO_CREATE
-        );
+            }
+        };
+        serviceConnection = connection;
 
-        return serviceConnectionFuture;
+        try {
+            boolean bound = this.getContext().bindService(serviceIntent, connection, Context.BIND_AUTO_CREATE);
+            if (!bound) {
+                serviceConnection = null;
+                IllegalStateException exception = new IllegalStateException("Failed to bind to background location service");
+                connectionFuture.completeExceptionally(exception);
+                stopBackgroundService();
+                serviceConnectionFuture = null;
+            }
+        } catch (SecurityException exception) {
+            serviceConnection = null;
+            connectionFuture.completeExceptionally(exception);
+            stopBackgroundService();
+            serviceConnectionFuture = null;
+        }
+
+        return connectionFuture;
+    }
+
+    private Intent createServiceIntent() {
+        return new Intent(this.getContext(), BackgroundGeolocationService.class);
+    }
+
+    private void stopBackgroundService() {
+        getContext().stopService(createServiceIntent());
+    }
+
+    private void releaseServiceConnection() {
+        if (serviceConnection == null) {
+            return;
+        }
+        try {
+            getContext().unbindService(serviceConnection);
+        } catch (IllegalArgumentException ignored) {
+            // Service was not bound or already unbound.
+        }
+        serviceConnection = null;
+    }
+
+    private void rejectServiceStartFailure(PluginCall call, Throwable throwable) {
+        Throwable cause = unwrapThrowable(throwable);
+        if (isForegroundServiceStartNotAllowed(cause)) {
+            call.reject(
+                "Cannot start background location while the app is in the background. Bring the app to the foreground and call start() again.",
+                "FOREGROUND_SERVICE_START_NOT_ALLOWED",
+                toException(cause)
+            );
+            return;
+        }
+        call.reject("Failed to start background location service: " + cause.getMessage(), toException(cause));
+    }
+
+    private static Exception toException(Throwable throwable) {
+        if (throwable instanceof Exception) {
+            return (Exception) throwable;
+        }
+        return new Exception(throwable);
+    }
+
+    static boolean isForegroundServiceStartNotAllowed(Throwable throwable) {
+        while (throwable != null) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && throwable instanceof ForegroundServiceStartNotAllowedException) {
+                return true;
+            }
+            String className = throwable.getClass().getName();
+            if (className.endsWith("ForegroundServiceStartNotAllowedException") || className.endsWith("ServiceStartNotAllowedException")) {
+                return true;
+            }
+            throwable = throwable.getCause();
+        }
+        return false;
+    }
+
+    private static Throwable unwrapThrowable(Throwable throwable) {
+        if (throwable instanceof java.util.concurrent.CompletionException && throwable.getCause() != null) {
+            return throwable.getCause();
+        }
+        return throwable;
     }
 
     @Override
@@ -441,6 +968,12 @@ public class BackgroundGeolocation extends Plugin {
         if (locationPermissionFuture != null && !locationPermissionFuture.isDone()) {
             locationPermissionFuture.cancel(true);
         }
+        if (geofencePermissionFuture != null && !geofencePermissionFuture.isDone()) {
+            geofencePermissionFuture.cancel(true);
+        }
+        LocalEvents.removeListener(localEventListener);
+        releaseServiceConnection();
+        serviceConnectionFuture = null;
         super.handleOnDestroy();
     }
 

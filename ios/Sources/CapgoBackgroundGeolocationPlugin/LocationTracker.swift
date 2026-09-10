@@ -19,10 +19,11 @@ class LocationTracker: NSObject, CLLocationManagerDelegate {
     private var maxTrackingDurationMs: Double = 43200000
     private var autoStopTimer: Timer?
 
-    var isTracking: Bool { locationManager != nil && isUpdatingLocation }
+    var isTracking: Bool { locationManager != nil }
 
     // Callback to forward locations to the JS layer (set by plugin)
     var onLocationUpdate: ((CLLocation) -> Void)?
+    var onLocationError: ((Error) -> Void)?
 
     // UserDefaults keys
     private static let keyIsTracking = "bg_geo_is_tracking"
@@ -58,7 +59,7 @@ class LocationTracker: NSObject, CLLocationManagerDelegate {
 
     // MARK: - Start
 
-    func start(distanceFilter: Double, maxDuration: Double, requestPermissions: Bool) {
+    func start(distanceFilter: Double, maxDuration: Double, requestPermissions: Bool, background: Bool = true) {
         guard locationManager == nil else {
             debugLog("Already tracking, ignoring start()")
             return
@@ -72,8 +73,8 @@ class LocationTracker: NSObject, CLLocationManagerDelegate {
         let externalPower: Bool = [.full, .charging].contains(UIDevice.current.batteryState)
         manager.desiredAccuracy = externalPower ? kCLLocationAccuracyBestForNavigation : kCLLocationAccuracyBest
         manager.distanceFilter = distanceFilter > 0 ? distanceFilter : kCLDistanceFilterNone
-        manager.allowsBackgroundLocationUpdates = true
-        manager.showsBackgroundLocationIndicator = true
+        manager.allowsBackgroundLocationUpdates = background
+        manager.showsBackgroundLocationIndicator = background
         manager.pausesLocationUpdatesAutomatically = false
         manager.activityType = .otherNavigation
 
@@ -81,22 +82,25 @@ class LocationTracker: NSObject, CLLocationManagerDelegate {
 
         // Save state for recovery
         let defaults = UserDefaults.standard
-        defaults.set(true, forKey: Self.keyIsTracking)
+        defaults.set(background, forKey: Self.keyIsTracking)
         defaults.set(Date().timeIntervalSince1970 * 1000, forKey: Self.keyTrackingStartTime)
         defaults.set(distanceFilter, forKey: Self.keyDistanceFilter)
         defaults.set(maxDuration, forKey: Self.keyMaxDuration)
 
         debugLog("Starting tracking. distanceFilter=\(distanceFilter), maxDuration=\(maxDuration), authStatus=\(manager.authorizationStatus.rawValue)")
 
-        // Request permissions if needed
+        let status = manager.authorizationStatus
+        if status == .denied || status == .restricted || (!requestPermissions && status == .notDetermined) {
+            stop()
+            onLocationError?(CLError(.denied))
+            return
+        }
         if requestPermissions {
-            let status = manager.authorizationStatus
-            if status == .notDetermined || status == .denied || status == .restricted {
-                manager.requestAlwaysAuthorization()
-                // Will start in didChangeAuthorization
+            if status == .notDetermined {
+                if background { manager.requestAlwaysAuthorization() } else { manager.requestWhenInUseAuthorization() }
                 return
             }
-            if status == .authorizedWhenInUse {
+            if background && status == .authorizedWhenInUse {
                 manager.requestAlwaysAuthorization()
             }
         }
@@ -152,6 +156,9 @@ class LocationTracker: NSObject, CLLocationManagerDelegate {
 
         start(distanceFilter: distanceFilter, maxDuration: maxDuration, requestPermissions: false)
 
+        // Keep the original session deadline over repeated process restarts.
+        defaults.set(startTime, forKey: Self.keyTrackingStartTime)
+
         // Adjust auto-stop for remaining time
         let remaining = maxDuration - elapsed
         startAutoStopTimer(remainingMs: remaining)
@@ -163,7 +170,7 @@ class LocationTracker: NSObject, CLLocationManagerDelegate {
         guard let manager = locationManager, !isUpdatingLocation else { return }
 
         manager.startUpdatingLocation()
-        manager.startMonitoringSignificantLocationChanges()
+        if manager.allowsBackgroundLocationUpdates { manager.startMonitoringSignificantLocationChanges() }
         isUpdatingLocation = true
 
         debugLog("Location updates started. allowsBackground=\(manager.allowsBackgroundLocationUpdates), showsIndicator=\(manager.showsBackgroundLocationIndicator)")
@@ -239,12 +246,17 @@ class LocationTracker: NSObject, CLLocationManagerDelegate {
             return // Transient, ignore
         }
         debugLog("Location error: \(error.localizedDescription)")
+        if (error as? CLError)?.code == .denied { stop() }
+        onLocationError?(error)
     }
 
     func locationManager(_ manager: CLLocationManager, didChangeAuthorization status: CLAuthorizationStatus) {
         debugLog("Authorization changed: \(status.rawValue)")
         if status == .authorizedAlways || status == .authorizedWhenInUse {
             startLocationUpdates()
+        } else if status == .denied || status == .restricted {
+            stop()
+            onLocationError?(CLError(.denied))
         }
     }
 }

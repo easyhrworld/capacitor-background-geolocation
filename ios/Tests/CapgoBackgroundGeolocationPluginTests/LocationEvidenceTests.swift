@@ -38,6 +38,18 @@ final class LocationEvidenceTests: XCTestCase {
         XCTAssertEqual(locationEvidenceStatus(UnattributedLocation(latitude: 19, longitude: 73)), "unknown")
     }
 
+    func testNativePostPayloadPreservesEvidenceAndSerializesUnavailableValues() throws {
+        let plugin = BackgroundGeolocation()
+        for (fix, expected) in [(location(mocked: true), "mocked"),
+                                (location(mocked: false), "not_detected"),
+                                (UnattributedLocation(latitude: 19, longitude: 73), "unknown")] {
+            let data = plugin.locationPayload(fix)
+            XCTAssertEqual(data["mockLocationStatus"] as? String, expected)
+            XCTAssertEqual(data["source"] as? String, "native")
+            XCTAssertNoThrow(try JSONSerialization.data(withJSONObject: data))
+        }
+    }
+
     func testPersistsEvidenceAcrossReopenAndUploadBatch() {
         var buffer: LocationBuffer? = LocationBuffer(databasePath: path, defaults: defaults)
         buffer?.insert(location(mocked: true))

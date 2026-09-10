@@ -18,6 +18,12 @@ Mock points are uploaded as evidence, rather than discarded on the device. The r
 
 ## Validation
 
+The fork incorporates Capgo upstream 8.4.5, including geofencing, permission APIs, native per-location POSTs, and its Android GPS/network provider implementation. EasyHR's `configure()` uploader retains its separate, owner-scoped durable batch queue. The optional `start({ url })` uploader is best-effort and sends a different payload; do not point it at EasyHR's batch endpoint. Both native payloads include mock-location evidence.
+
+Android retains persisted tracking, boot recovery, and the 12-hour attendance-session limit even when no upstream `url` is configured. `minIntervalMs` controls the Android request interval and the optional per-location POST gate; it does not replace the batch upload interval. The app explicitly uses a 10-second request interval and `networkFallback: true` for gaps in GPS coverage. Network fallback only accepts fixes within 300 meters after GPS has been silent for 20 seconds. Fresh foreground captures still use the fused one-shot provider.
+
+iOS retains the independent location tracker and now honors foreground-only requests, reports permission failures, and preserves the original session deadline across restores. Native per-location POSTs run before the saved JavaScript callback check.
+
 Automated coverage includes Android OS mock flags, buffer reopen/persistence, old-schema migration, employee isolation, and the corresponding iOS cases. Android tests use Robolectric API 31; iOS tests use the available simulator.
 
 iOS regression tests also cover each interrupted schema state, a failed backfill that must roll back all schema changes, retry on reopen, and preservation of ownership across account changes.

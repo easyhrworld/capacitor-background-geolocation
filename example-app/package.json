@@ -1,7 +1,7 @@
 {
   "name": "capacitor-app",
   "version": "1.0.0",
-  "description": "Example Capacitor app for @capgo/background-geolocation",
+  "description": "Example Capacitor app for @easyhrworld/capacitor-background-geolocation",
   "type": "module",
   "keywords": [
     "capacitor",
@@ -16,12 +16,15 @@
     "@capacitor/core": "^8.0.0",
     "@capacitor/android": "^8.0.0",
     "@capacitor/ios": "^8.0.0",
-    "@capgo/background-geolocation": "file:..",
-    "@capacitor/local-notifications": "7.0.6"
+    "@easyhrworld/capacitor-background-geolocation": "file:..",
+    "@capacitor/local-notifications": "7.0.7",
+    "@capgo/capacitor-updater": "^8.45.11",
+    "@capacitor/splash-screen": "^8.0.0"
   },
   "devDependencies": {
     "@capacitor/cli": "^8.0.0",
-    "vite": "^7.3.1"
+    "vite": "^7.3.1",
+    "typescript": "^5.9.3"
   },
   "author": "",
   "license": "ISC"

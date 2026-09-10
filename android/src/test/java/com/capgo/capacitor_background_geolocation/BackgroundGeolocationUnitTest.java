@@ -1,8 +1,16 @@
-package com.capgo.capacitor_background_geolocation;
+package com.easyhrworld.capacitor_background_geolocation;
 
 import static org.junit.Assert.*;
 
+import android.content.Intent;
 import android.location.Location;
+import androidx.core.location.LocationListenerCompat;
+import com.getcapacitor.JSObject;
+import com.getcapacitor.PermissionState;
+import com.getcapacitor.PluginCall;
+import com.google.android.gms.location.Geofence;
+import com.google.android.gms.location.GeofenceStatusCodes;
+import org.json.JSONException;
 import org.junit.Test;
 
 /**
@@ -31,9 +39,116 @@ public class BackgroundGeolocationUnitTest {
 
             Class<?> serviceClass = Class.forName("com.easyhrworld.capacitor_background_geolocation.BackgroundGeolocationService");
             assertNotNull("BackgroundGeolocationService class should exist", serviceClass);
+
+            Class<?> receiverClass = Class.forName("com.easyhrworld.capacitor_background_geolocation.GeofenceBroadcastReceiver");
+            assertNotNull("GeofenceBroadcastReceiver class should exist", receiverClass);
+
+            Class<?> storeClass = Class.forName("com.easyhrworld.capacitor_background_geolocation.GeofenceStore");
+            assertNotNull("GeofenceStore class should exist", storeClass);
+
+            Class<?> bootReceiverClass = Class.forName("com.easyhrworld.capacitor_background_geolocation.GeofenceBootReceiver");
+            assertNotNull("GeofenceBootReceiver class should exist", bootReceiverClass);
         } catch (ClassNotFoundException e) {
             fail("Plugin classes should exist: " + e.getMessage());
         }
+    }
+
+    @Test
+    public void testCreateLocationListenerReturnsCompatListener() {
+        LocationListenerCompat listener = BackgroundGeolocationService.createLocationListener(null);
+        assertNotNull("Location listener should be created", listener);
+    }
+
+    @Test
+    public void testPermissionStateValueMapping() throws Exception {
+        java.lang.reflect.Method method = BackgroundGeolocation.class.getDeclaredMethod("permissionStateValue", PermissionState.class);
+        method.setAccessible(true);
+        BackgroundGeolocation plugin = new BackgroundGeolocation();
+
+        assertEquals("granted", method.invoke(plugin, PermissionState.GRANTED));
+        assertEquals("denied", method.invoke(plugin, PermissionState.DENIED));
+        assertEquals("prompt", method.invoke(plugin, PermissionState.PROMPT));
+        assertEquals("prompt", method.invoke(plugin, PermissionState.PROMPT_WITH_RATIONALE));
+    }
+
+    @Test
+    public void testGeofenceResetErrorClearsStoredRegions() {
+        assertTrue(
+            "GEOFENCE_NOT_AVAILABLE should clear stale cached geofences",
+            GeofenceBroadcastReceiver.shouldClearStoredRegions(GeofenceStatusCodes.GEOFENCE_NOT_AVAILABLE)
+        );
+        assertFalse(
+            "Other geofence errors should preserve cached regions",
+            GeofenceBroadcastReceiver.shouldClearStoredRegions(GeofenceStatusCodes.GEOFENCE_TOO_MANY_GEOFENCES)
+        );
+    }
+
+    @Test
+    public void testGeofenceBootReceiverRestoreActions() {
+        assertTrue(
+            "BOOT_COMPLETED should restore persisted geofences",
+            GeofenceBootReceiver.shouldRestoreAction(Intent.ACTION_BOOT_COMPLETED)
+        );
+        assertTrue(
+            "MY_PACKAGE_REPLACED should restore persisted geofences",
+            GeofenceBootReceiver.shouldRestoreAction(Intent.ACTION_MY_PACKAGE_REPLACED)
+        );
+        assertFalse("Other actions should be ignored", GeofenceBootReceiver.shouldRestoreAction(Intent.ACTION_AIRPLANE_MODE_CHANGED));
+    }
+
+    @Test
+    public void testGeofenceTransitionTypes() throws Exception {
+        assertEquals(
+            Geofence.GEOFENCE_TRANSITION_ENTER | Geofence.GEOFENCE_TRANSITION_EXIT,
+            GeofenceStore.geofenceTransitionTypes(true, true)
+        );
+        assertEquals(Geofence.GEOFENCE_TRANSITION_ENTER, GeofenceStore.geofenceTransitionTypes(true, false));
+        assertEquals(Geofence.GEOFENCE_TRANSITION_EXIT, GeofenceStore.geofenceTransitionTypes(false, true));
+    }
+
+    @Test
+    public void testLongOptionFromCallCoercesIntegerBridgeValue() throws JSONException {
+        JSObject data = new JSObject();
+        data.put("minIntervalMs", 295_000);
+
+        PluginCall call = new PluginCall(null, "BackgroundGeolocation", "test-callback", "start", data);
+
+        assertEquals(
+            "JS numbers within Integer range must be read as minIntervalMs",
+            295_000L,
+            BackgroundGeolocation.longOptionFromCall(call, "minIntervalMs", 0L)
+        );
+        assertEquals("PluginCall.getLong misses Integer bridge values (issue #62)", Long.valueOf(0L), call.getLong("minIntervalMs", 0L));
+    }
+
+    @Test
+    public void testLongOptionFromCallUsesDefaultWhenMissing() {
+        PluginCall call = new PluginCall(null, "BackgroundGeolocation", "test-callback", "start", new JSObject());
+
+        assertEquals(0L, BackgroundGeolocation.longOptionFromCall(call, "minIntervalMs", 0L));
+        assertEquals(60_000L, BackgroundGeolocation.longOptionFromCall(call, "minIntervalMs", 60_000L));
+    }
+
+    @Test
+    public void testForegroundServiceStartNotAllowedDetection() {
+        assertTrue(
+            "ForegroundServiceStartNotAllowedException class name should be detected",
+            BackgroundGeolocation.isForegroundServiceStartNotAllowed(new ForegroundServiceStartNotAllowedException())
+        );
+        assertTrue(
+            "ServiceStartNotAllowedException class name should be detected",
+            BackgroundGeolocation.isForegroundServiceStartNotAllowed(new ServiceStartNotAllowedException())
+        );
+        assertTrue(
+            "Wrapped foreground service start failures should be detected",
+            BackgroundGeolocation.isForegroundServiceStartNotAllowed(
+                new RuntimeException("wrapped", new ForegroundServiceStartNotAllowedException())
+            )
+        );
+        assertFalse(
+            "Unrelated exceptions should not be treated as FGS start failures",
+            BackgroundGeolocation.isForegroundServiceStartNotAllowed(new IllegalStateException("other failure"))
+        );
     }
 
     @Test
@@ -113,4 +228,8 @@ public class BackgroundGeolocationUnitTest {
     private boolean isValidLongitude(double longitude) {
         return longitude >= -180.0 && longitude <= 180.0;
     }
+
+    private static class ForegroundServiceStartNotAllowedException extends RuntimeException {}
+
+    private static class ServiceStartNotAllowedException extends RuntimeException {}
 }
