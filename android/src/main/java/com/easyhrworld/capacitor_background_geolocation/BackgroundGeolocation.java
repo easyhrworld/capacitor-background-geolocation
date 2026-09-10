@@ -388,9 +388,9 @@ public class BackgroundGeolocation extends Plugin {
 
     @PluginMethod
     public void stop(PluginCall call) {
-        // Always connect to the service to stop it — even if serviceConnectionFuture
-        // is null (e.g. app was killed and reopened while service was running headless)
-        getServiceConnection()
+        // Rebind to stop an existing headless service, without starting a new
+        // foreground service that would never post a notification on cold logout.
+        getServiceConnection(false)
             .thenAccept((service) -> {
                 var callbackId = service.stop();
                 if (callbackId != null) {
@@ -845,6 +845,10 @@ public class BackgroundGeolocation extends Plugin {
     }
 
     private CompletableFuture<BackgroundGeolocationService.LocalBinder> getServiceConnection() {
+        return getServiceConnection(true);
+    }
+
+    private CompletableFuture<BackgroundGeolocationService.LocalBinder> getServiceConnection(boolean startService) {
         if (serviceConnectionFuture != null && !serviceConnectionFuture.isCompletedExceptionally()) {
             return serviceConnectionFuture;
         }
@@ -854,9 +858,9 @@ public class BackgroundGeolocation extends Plugin {
 
         Intent serviceIntent = createServiceIntent();
         try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            if (startService && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 this.getContext().startForegroundService(serviceIntent);
-            } else {
+            } else if (startService) {
                 this.getContext().startService(serviceIntent);
             }
         } catch (RuntimeException exception) {
@@ -997,14 +1001,14 @@ public class BackgroundGeolocation extends Plugin {
             call.reject("Could not prepare the location buffer", "BUFFER_ERROR", error);
             return;
         }
-        String serverUrl = call.getString("serverUrl", "");
-        String authToken = call.getString("authToken", "");
-        String employeeId = call.getString("employeeId", "");
-        String tenantId = call.getString("tenantId", "");
-        int batchSize = call.getInt("batchSize", 20);
-        int postIntervalMs = call.getInt("postIntervalMs", 60000);
-
         SharedPreferences prefs = getContext().getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+        String serverUrl = call.getString("serverUrl", prefs.getString("headless_server_url", ""));
+        String authToken = call.getString("authToken", prefs.getString("headless_auth_token", ""));
+        String employeeId = call.getString("employeeId", prefs.getString("headless_employee_id", ""));
+        String tenantId = call.getString("tenantId", prefs.getString("headless_tenant_id", ""));
+        int batchSize = call.getInt("batchSize", prefs.getInt("headless_batch_size", 20));
+        int postIntervalMs = call.getInt("postIntervalMs", prefs.getInt("headless_post_interval", 60000));
+
         prefs
             .edit()
             .putString("headless_server_url", serverUrl)
