@@ -1,12 +1,17 @@
 package com.easyhrworld.capacitor_background_geolocation;
 
 import static org.junit.Assert.*;
+import static org.robolectric.Shadows.shadowOf;
 
+import android.app.Application;
 import android.app.Service;
+import android.content.ComponentName;
 import android.content.Context;
+import android.content.ContextWrapper;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.location.Location;
+import android.os.Looper;
 import com.getcapacitor.JSObject;
 import com.getcapacitor.PermissionState;
 import com.getcapacitor.PluginCall;
@@ -106,6 +111,62 @@ public class UpstreamIntegrationTest {
     }
 
     @Test
+    public void coldStopDoesNotStartAForegroundServiceAndPreservesEvidence() throws Exception {
+        assertStopRebindsWithoutStarting(false);
+    }
+
+    @Test
+    public void headlessStopRebindsWithoutStartingAnotherForegroundService() throws Exception {
+        assertStopRebindsWithoutStarting(true);
+    }
+
+    private void assertStopRebindsWithoutStarting(boolean tracking) throws Exception {
+        prefs.edit().putBoolean("is_tracking", tracking).putLong("tracking_start_time", System.currentTimeMillis()).commit();
+        Location point = new Location("gps");
+        point.setLatitude(19);
+        point.setLongitude(73);
+        point.setTime(1000);
+        point.setMock(true);
+        try (LocationBuffer buffer = new LocationBuffer(context)) {
+            buffer.insert(point);
+        }
+        controller = Robolectric.buildService(BackgroundGeolocationService.class).create();
+        if (tracking) controller.get().onStartCommand(null, 0, 1);
+        shadowOf((Application) context).setComponentNameAndServiceForBindService(
+            new ComponentName(context, BackgroundGeolocationService.class),
+            controller.get().onBind(new Intent())
+        );
+        RecordingCall call = new RecordingCall();
+        new ContextPlugin().stop(call);
+        shadowOf(Looper.getMainLooper()).idle();
+        assertTrue(call.resolved);
+        assertFalse(prefs.getBoolean("is_tracking", true));
+        try (LocationBuffer buffer = new LocationBuffer(context)) {
+            assertEquals(1, buffer.getAll().length());
+        }
+    }
+
+    @Test
+    public void clearingTheTokenPreservesQueueOwnerAndOtherHeadlessSettings() {
+        prefs
+            .edit()
+            .putString("headless_auth_token", "old-token")
+            .putString("headless_server_url", "https://example.invalid")
+            .putInt("headless_batch_size", 7)
+            .putInt("headless_post_interval", 30000)
+            .commit();
+        RecordingCall call = new RecordingCall(new JSObject().put("authToken", ""));
+        new ContextPlugin().configure(call);
+        assertTrue(call.resolved);
+        assertEquals("", prefs.getString("headless_auth_token", null));
+        assertEquals("tenant", prefs.getString("headless_tenant_id", null));
+        assertEquals("alice", prefs.getString("headless_employee_id", null));
+        assertEquals("https://example.invalid", prefs.getString("headless_server_url", null));
+        assertEquals(7, prefs.getInt("headless_batch_size", 0));
+        assertEquals(30000, prefs.getInt("headless_post_interval", 0));
+    }
+
+    @Test
     public void permissionDenialResolvesWithoutRequestingTheSamePermissionAgain() throws Exception {
         DenyingPlugin plugin = new DenyingPlugin();
         RecordingCall call = new RecordingCall();
@@ -135,14 +196,42 @@ public class UpstreamIntegrationTest {
     private static class RecordingCall extends PluginCall {
 
         JSObject result;
+        boolean resolved;
 
         RecordingCall() {
-            super(null, "BackgroundGeolocation", "test", "requestPermissions", new JSObject());
+            this(new JSObject());
+        }
+
+        RecordingCall(JSObject data) {
+            super(null, "BackgroundGeolocation", "test", "requestPermissions", data);
+        }
+
+        @Override
+        public void resolve() {
+            resolved = true;
         }
 
         @Override
         public void resolve(JSObject data) {
             result = data;
+        }
+    }
+
+    private class ContextPlugin extends BackgroundGeolocation {
+
+        @Override
+        public Context getContext() {
+            return new ContextWrapper(context) {
+                @Override
+                public ComponentName startForegroundService(Intent intent) {
+                    throw new AssertionError("Stopping must not start a foreground service");
+                }
+
+                @Override
+                public ComponentName startService(Intent intent) {
+                    throw new AssertionError("Stopping must not start a service");
+                }
+            };
         }
     }
 
