@@ -6,6 +6,7 @@ on:
 
 jobs:
   github-releases-to-discord:
+    if: github.repository_owner == 'Cap-go'
     # Keep this job capped at 10 minutes; never raise it unless explicitly asked.
     timeout-minutes: 10
     runs-on: ubuntu-latest

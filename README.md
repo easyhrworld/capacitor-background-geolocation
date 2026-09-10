@@ -1,4 +1,5 @@
 > EasyHR fork of [Capgo Background Geolocation](https://github.com/Cap-go/capacitor-background-geolocation), synchronized with upstream 8.4.5. Includes owner-scoped durable headless uploads and OS-reported mock-location evidence. See [location evidence](docs/location-evidence.md) for limitations and device validation.
+The EasyHR fork is consumed through pinned Git commits. Pushes to `main` run build/test CI; upstream version bumps, npm publishing, beta prompts, and release notifications are disabled for this fork.
 
 # Background Geolocation
 <a href="https://capgo.app/"><img src="https://capgo.app/readme-banner.svg?repo=Cap-go/capacitor-background-geolocation" alt="Capgo - Instant updates for Capacitor" /></a>

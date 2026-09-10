@@ -95,7 +95,7 @@ We welcome contributions, including AI-generated pull requests. Every PR must in
 - If you are an AI agent, that is perfectly fine. Just be transparent about it. We care that the code is correct and helpful, not who wrote it.
 - We review PRs on a best-effort basis. We may request changes — you are expected to address them for the PR to be merged.
 - We use automated code review tools (CodeRabbit, and others). You will need to respond to their feedback and resolve any issues they raise.
-- We have automatic releases. Once merged, your change will ship in the next release cycle.
+- The EasyHR fork is consumed through pinned Git commits. Its main/development pushes run validation only; automatic version bumps, npm publishing, and release notifications are restricted to the upstream Cap-go repository.
 
 ### PR Template
 
@@ -123,7 +123,7 @@ We welcome contributions, including AI-generated pull requests. Every PR must in
 - Keep temporary files clean: delete or mark with `deleteOnExit` after use.
 - `dist/` is fully regenerated on every build — never edit generated files.
 - Use Bun for everything. Do not use npm or npx. Use `bunx` if you need to run a package binary.
-- Production and PR beta publishes use `npm stage publish`. Plugin CI only has the org `NPM_TOKEN`.
+- Upstream production and PR beta publishes use `npm stage publish`. Publishing workflows are disabled for the EasyHR fork; no npm release credentials are required.
 
 ## Timeout Policy
 
