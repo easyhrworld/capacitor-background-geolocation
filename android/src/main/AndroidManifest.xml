@@ -8,9 +8,23 @@
             android:foregroundServiceType="location" />
 
         <receiver
+            android:name="com.easyhrworld.capacitor_background_geolocation.GeofenceBroadcastReceiver"
+            android:enabled="true"
+            android:exported="false" />
+
+        <receiver
+            android:name="com.easyhrworld.capacitor_background_geolocation.GeofenceBootReceiver"
+            android:enabled="true"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
+        <receiver
             android:name="com.easyhrworld.capacitor_background_geolocation.BootReceiver"
             android:enabled="true"
-            android:exported="true">
+            android:exported="false">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
             </intent-filter>
@@ -19,15 +33,16 @@
 
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
-    <!-- Required for background location on Android 10+ -->
-    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <!-- Android SDK 34+ requires FOREGROUND_SERVICE_LOCATION for location foreground services -->
+    <!-- Android SDK 34+ additionally requires the FOREGROUND_SERVICE_LOCATION
+    runtime permission to start a foreground service of type "location". -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
-    <!-- Android SDK 33+ requires POST_NOTIFICATIONS for the persistent notification -->
+    <!-- Android SDK 33+ requires the POST_NOTIFICATIONS runtime permission to
+    display the foreground service notification. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- See https://github.com/Cap-go/capacitor-background-geolocation/issues/12 for more details-->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
-    <!-- Restart tracking after device reboot -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.INTERNET" />
     <uses-feature android:name="android.hardware.location.gps" />
 </manifest>

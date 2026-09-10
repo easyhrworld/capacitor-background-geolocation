@@ -8,10 +8,13 @@ class LocationBuffer {
 
     private static let dbName = "bg_geo_locations.db"
     private static let tableName = "buffered_locations"
+    private static let schemaVersion: Int32 = 2
     private var db: OpaquePointer?
+    private let defaults: UserDefaults
 
-    init() {
-        openDatabase()
+    init(databasePath: String? = nil, defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        openDatabase(databasePath)
         createTableIfNeeded()
     }
 
@@ -23,18 +26,44 @@ class LocationBuffer {
 
     // MARK: - Database Setup
 
-    private func openDatabase() {
+    private func openDatabase(_ databasePath: String?) {
         let fileURL = try! FileManager.default
             .url(for: .documentDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
             .appendingPathComponent(LocationBuffer.dbName)
 
-        if sqlite3_open(fileURL.path, &db) != SQLITE_OK {
+        if sqlite3_open(databasePath ?? fileURL.path, &db) != SQLITE_OK {
             print("[BackgroundGeolocation] Failed to open database")
             db = nil
         }
     }
 
     private func createTableIfNeeded() {
+        do {
+            try executeChecked("BEGIN IMMEDIATE")
+            var committed = false
+            defer {
+                if !committed { execute("ROLLBACK") }
+            }
+
+            let versionStatement = try prepare("PRAGMA user_version")
+            defer { sqlite3_finalize(versionStatement) }
+            guard sqlite3_step(versionStatement) == SQLITE_ROW else { throw databaseError() }
+            let version = sqlite3_column_int(versionStatement, 0)
+            guard sqlite3_step(versionStatement) == SQLITE_DONE else { throw databaseError() }
+
+            if version < Self.schemaVersion {
+                try migrateSchema()
+                try executeChecked("PRAGMA user_version = \(Self.schemaVersion)")
+            }
+
+            try executeChecked("COMMIT")
+            committed = true
+        } catch {
+            print("[BackgroundGeolocation] Failed to migrate location buffer: \(error.localizedDescription)")
+        }
+    }
+
+    private func migrateSchema() throws {
         let sql = """
         CREATE TABLE IF NOT EXISTS \(LocationBuffer.tableName) (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -48,7 +77,33 @@ class LocationBuffer {
             synced INTEGER DEFAULT 0
         )
         """
-        execute(sql)
+        try executeChecked(sql)
+        // Inspect each column separately to recover upgrades interrupted by older versions.
+        let stmt = try prepare("PRAGMA table_info(buffered_locations)")
+        defer { sqlite3_finalize(stmt) }
+        var columns = Set<String>()
+        var result = sqlite3_step(stmt)
+        while result == SQLITE_ROW {
+            columns.insert(String(cString: sqlite3_column_text(stmt, 1)))
+            result = sqlite3_step(stmt)
+        }
+        guard result == SQLITE_DONE else { throw databaseError() }
+        if !columns.contains("mockLocationStatus") {
+            try executeChecked("ALTER TABLE buffered_locations ADD COLUMN mockLocationStatus TEXT NOT NULL DEFAULT 'unknown'")
+        }
+        if !columns.contains("ownerTenant") {
+            try executeChecked("ALTER TABLE buffered_locations ADD COLUMN ownerTenant TEXT NOT NULL DEFAULT ''")
+        }
+        if !columns.contains("ownerEmployee") {
+            try executeChecked("ALTER TABLE buffered_locations ADD COLUMN ownerEmployee TEXT NOT NULL DEFAULT ''")
+        }
+
+        // Backfill once, including when both columns were added but the old upgrade stopped
+        // before assigning ownership. Never overwrite another employee's existing records.
+        let migration = try prepare("UPDATE buffered_locations SET ownerTenant = ?, ownerEmployee = ? WHERE ownerTenant = '' AND ownerEmployee = ''")
+        defer { sqlite3_finalize(migration) }
+        guard bindOwner(migration) == SQLITE_OK,
+              sqlite3_step(migration) == SQLITE_DONE else { throw databaseError() }
     }
 
     // MARK: - Insert
@@ -56,8 +111,8 @@ class LocationBuffer {
     func insert(_ location: CLLocation) {
         let sql = """
         INSERT INTO \(LocationBuffer.tableName)
-        (lat, lng, accuracy, speed, bearing, altitude, timestamp, synced)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 0)
+        (lat, lng, accuracy, speed, bearing, altitude, timestamp, mockLocationStatus, ownerTenant, ownerEmployee, synced)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
         """
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
@@ -74,6 +129,10 @@ class LocationBuffer {
         sqlite3_bind_double(stmt, 6, location.altitude)
         sqlite3_bind_int64(stmt, 7, Int64(location.timestamp.timeIntervalSince1970 * 1000))
 
+        let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+        sqlite3_bind_text(stmt, 8, locationEvidenceStatus(location), -1, transient)
+        bindOwner(stmt, startingAt: 9)
+
         if sqlite3_step(stmt) != SQLITE_DONE {
             print("[BackgroundGeolocation] Failed to insert location")
         }
@@ -81,11 +140,11 @@ class LocationBuffer {
 
     // MARK: - Query
 
-    func getUnsyncedBatch(_ batchSize: Int) -> [[String: Any]] {
+    func getUnsyncedBatch(_ batchSize: Int, ownerTenant: String? = nil, ownerEmployee: String? = nil) -> [[String: Any]] {
         let sql = """
-        SELECT id, lat, lng, accuracy, speed, bearing, altitude, timestamp
+        SELECT id, lat, lng, accuracy, speed, bearing, altitude, timestamp, mockLocationStatus
         FROM \(LocationBuffer.tableName)
-        WHERE synced = 0
+        WHERE synced = 0 AND ownerTenant = ? AND ownerEmployee = ?
         ORDER BY id ASC
         LIMIT ?
         """
@@ -93,8 +152,10 @@ class LocationBuffer {
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
         defer { sqlite3_finalize(stmt) }
 
-        sqlite3_bind_int(stmt, 1, Int32(batchSize))
+        bindOwner(stmt, tenant: ownerTenant, employee: ownerEmployee)
+        sqlite3_bind_int(stmt, 3, Int32(batchSize))
 
+        bindOwner(stmt, tenant: ownerTenant, employee: ownerEmployee)
         var results: [[String: Any]] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
             let row: [String: Any] = [
@@ -106,6 +167,7 @@ class LocationBuffer {
                 "bearing": sqlite3_column_double(stmt, 5),
                 "altitude": sqlite3_column_double(stmt, 6),
                 "timestamp": sqlite3_column_int64(stmt, 7),
+                "mockLocationStatus": String(cString: sqlite3_column_text(stmt, 8)),
             ]
             results.append(row)
         }
@@ -114,14 +176,16 @@ class LocationBuffer {
 
     func getAll() -> [[String: Any]] {
         let sql = """
-        SELECT lat, lng, accuracy, speed, bearing, altitude, timestamp
+        SELECT lat, lng, accuracy, speed, bearing, altitude, timestamp, mockLocationStatus
         FROM \(LocationBuffer.tableName)
+        WHERE ownerTenant = ? AND ownerEmployee = ?
         ORDER BY id ASC
         """
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
         defer { sqlite3_finalize(stmt) }
 
+        bindOwner(stmt)
         var results: [[String: Any]] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
             let row: [String: Any] = [
@@ -132,6 +196,7 @@ class LocationBuffer {
                 "bearing": sqlite3_column_double(stmt, 4),
                 "altitude": sqlite3_column_double(stmt, 5),
                 "timestamp": sqlite3_column_int64(stmt, 6),
+                "mockLocationStatus": String(cString: sqlite3_column_text(stmt, 7)),
             ]
             results.append(row)
         }
@@ -162,15 +227,21 @@ class LocationBuffer {
     // MARK: - Clear
 
     func clearAll() {
-        execute("DELETE FROM \(LocationBuffer.tableName)")
+        var stmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, "DELETE FROM buffered_locations WHERE ownerTenant = ? AND ownerEmployee = ?", -1, &stmt, nil) == SQLITE_OK {
+            bindOwner(stmt)
+            sqlite3_step(stmt)
+        }
+        sqlite3_finalize(stmt)
     }
 
     func getUnsyncedCount() -> Int {
-        let sql = "SELECT COUNT(*) FROM \(LocationBuffer.tableName) WHERE synced = 0"
+        let sql = "SELECT COUNT(*) FROM \(LocationBuffer.tableName) WHERE synced = 0 AND ownerTenant = ? AND ownerEmployee = ?"
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return 0 }
         defer { sqlite3_finalize(stmt) }
 
+        bindOwner(stmt)
         if sqlite3_step(stmt) == SQLITE_ROW {
             return Int(sqlite3_column_int(stmt, 0))
         }
@@ -178,6 +249,33 @@ class LocationBuffer {
     }
 
     // MARK: - Helpers
+
+    @discardableResult
+    private func bindOwner(_ stmt: OpaquePointer?, startingAt index: Int32 = 1, tenant: String? = nil, employee: String? = nil) -> Int32 {
+        objc_sync_enter(defaults)
+        defer { objc_sync_exit(defaults) }
+        let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+        let result = sqlite3_bind_text(stmt, index, tenant ?? defaults.string(forKey: "bg_geo_tenant_id") ?? "", -1, transient)
+        guard result == SQLITE_OK else { return result }
+        return sqlite3_bind_text(stmt, index + 1, employee ?? defaults.string(forKey: "bg_geo_employee_id") ?? "", -1, transient)
+    }
+
+    private func databaseError() -> NSError {
+        NSError(domain: "LocationBuffer", code: Int(sqlite3_errcode(db)),
+                userInfo: [NSLocalizedDescriptionKey: String(cString: sqlite3_errmsg(db))])
+    }
+
+    private func prepare(_ sql: String) throws -> OpaquePointer {
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK, let stmt = stmt else {
+            throw databaseError()
+        }
+        return stmt
+    }
+
+    private func executeChecked(_ sql: String) throws {
+        guard sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK else { throw databaseError() }
+    }
 
     private func execute(_ sql: String) {
         if sqlite3_exec(db, sql, nil, nil, nil) != SQLITE_OK {

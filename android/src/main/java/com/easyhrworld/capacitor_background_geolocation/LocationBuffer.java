@@ -15,34 +15,49 @@ import org.json.JSONObject;
 public class LocationBuffer extends SQLiteOpenHelper {
 
     private static final String DB_NAME = "bg_geo_locations.db";
-    private static final int DB_VERSION = 1;
+    private static final int DB_VERSION = 2;
+    private final Context context;
+    private static final String OWNER_FILTER = "ownerTenant = ? AND ownerEmployee = ?";
     private static final String TABLE = "buffered_locations";
 
     public LocationBuffer(Context context) {
         super(context, DB_NAME, null, DB_VERSION);
+        this.context = context.getApplicationContext();
     }
 
     @Override
     public void onCreate(SQLiteDatabase db) {
         db.execSQL(
-            "CREATE TABLE " + TABLE + " (" +
-            "id INTEGER PRIMARY KEY AUTOINCREMENT, " +
-            "lat REAL NOT NULL, " +
-            "lng REAL NOT NULL, " +
-            "accuracy REAL, " +
-            "speed REAL, " +
-            "bearing REAL, " +
-            "altitude REAL, " +
-            "timestamp INTEGER NOT NULL, " +
-            "synced INTEGER DEFAULT 0" +
-            ")"
+            "CREATE TABLE " +
+                TABLE +
+                " (" +
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, " +
+                "lat REAL NOT NULL, " +
+                "lng REAL NOT NULL, " +
+                "accuracy REAL, " +
+                "speed REAL, " +
+                "bearing REAL, " +
+                "altitude REAL, " +
+                "timestamp INTEGER NOT NULL, " +
+                "synced INTEGER DEFAULT 0, " +
+                "mockLocationStatus TEXT NOT NULL DEFAULT 'unknown', " +
+                "ownerTenant TEXT NOT NULL DEFAULT '', ownerEmployee TEXT NOT NULL DEFAULT ''" +
+                ")"
         );
     }
 
     @Override
     public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
-        db.execSQL("DROP TABLE IF EXISTS " + TABLE);
-        onCreate(db);
+        if (oldVersion < 2) {
+            db.execSQL("ALTER TABLE " + TABLE + " ADD COLUMN mockLocationStatus TEXT NOT NULL DEFAULT 'unknown'");
+            db.execSQL("ALTER TABLE " + TABLE + " ADD COLUMN ownerTenant TEXT NOT NULL DEFAULT ''");
+            db.execSQL("ALTER TABLE " + TABLE + " ADD COLUMN ownerEmployee TEXT NOT NULL DEFAULT ''");
+            String[] owner = owner();
+            ContentValues values = new ContentValues();
+            values.put("ownerTenant", owner[0]);
+            values.put("ownerEmployee", owner[1]);
+            db.update(TABLE, values, null, null);
+        }
     }
 
     public void insert(Location location) {
@@ -57,6 +72,10 @@ public class LocationBuffer extends SQLiteOpenHelper {
             values.put("altitude", location.hasAltitude() ? location.getAltitude() : 0);
             values.put("timestamp", location.getTime());
             values.put("synced", 0);
+            values.put("mockLocationStatus", LocationEvidence.status(location));
+            String[] owner = owner();
+            values.put("ownerTenant", owner[0]);
+            values.put("ownerEmployee", owner[1]);
             db.insert(TABLE, null, values);
         } catch (Exception e) {
             Logger.error("Failed to buffer location", e);
@@ -68,13 +87,17 @@ public class LocationBuffer extends SQLiteOpenHelper {
         try {
             SQLiteDatabase db = getReadableDatabase();
             Cursor cursor = db.query(
-                TABLE, null, "synced = 0", null, null, null,
-                "id ASC", String.valueOf(batchSize)
+                TABLE,
+                null,
+                "synced = 0 AND " + OWNER_FILTER,
+                owner(),
+                null,
+                null,
+                "id ASC",
+                String.valueOf(batchSize)
             );
             while (cursor.moveToNext()) {
-                long[] row = new long[]{
-                    cursor.getLong(cursor.getColumnIndexOrThrow("id")),
-                };
+                long[] row = new long[] { cursor.getLong(cursor.getColumnIndexOrThrow("id")) };
                 batch.add(row);
             }
             cursor.close();
@@ -85,13 +108,14 @@ public class LocationBuffer extends SQLiteOpenHelper {
     }
 
     public JSONArray getUnsyncedBatchAsJson(int batchSize) {
+        return getUnsyncedBatchAsJson(batchSize, owner());
+    }
+
+    public JSONArray getUnsyncedBatchAsJson(int batchSize, String[] owner) {
         JSONArray arr = new JSONArray();
         try {
             SQLiteDatabase db = getReadableDatabase();
-            Cursor cursor = db.query(
-                TABLE, null, "synced = 0", null, null, null,
-                "id ASC", String.valueOf(batchSize)
-            );
+            Cursor cursor = db.query(TABLE, null, "synced = 0 AND " + OWNER_FILTER, owner, null, null, "id ASC", String.valueOf(batchSize));
             while (cursor.moveToNext()) {
                 JSONObject obj = new JSONObject();
                 obj.put("id", cursor.getLong(cursor.getColumnIndexOrThrow("id")));
@@ -102,6 +126,7 @@ public class LocationBuffer extends SQLiteOpenHelper {
                 obj.put("bearing", cursor.getDouble(cursor.getColumnIndexOrThrow("bearing")));
                 obj.put("altitude", cursor.getDouble(cursor.getColumnIndexOrThrow("altitude")));
                 obj.put("timestamp", cursor.getLong(cursor.getColumnIndexOrThrow("timestamp")));
+                obj.put("mockLocationStatus", cursor.getString(cursor.getColumnIndexOrThrow("mockLocationStatus")));
                 arr.put(obj);
             }
             cursor.close();
@@ -120,7 +145,7 @@ public class LocationBuffer extends SQLiteOpenHelper {
                 long id = loc.getLong("id");
                 ContentValues values = new ContentValues();
                 values.put("synced", 1);
-                db.update(TABLE, values, "id = ?", new String[]{String.valueOf(id)});
+                db.update(TABLE, values, "id = ?", new String[] { String.valueOf(id) });
             }
             db.setTransactionSuccessful();
             db.endTransaction();
@@ -142,9 +167,7 @@ public class LocationBuffer extends SQLiteOpenHelper {
         JSONArray arr = new JSONArray();
         try {
             SQLiteDatabase db = getReadableDatabase();
-            Cursor cursor = db.query(
-                TABLE, null, null, null, null, null, "id ASC"
-            );
+            Cursor cursor = db.query(TABLE, null, OWNER_FILTER, owner(), null, null, "id ASC");
             while (cursor.moveToNext()) {
                 JSONObject obj = new JSONObject();
                 obj.put("lat", cursor.getDouble(cursor.getColumnIndexOrThrow("lat")));
@@ -154,6 +177,7 @@ public class LocationBuffer extends SQLiteOpenHelper {
                 obj.put("bearing", cursor.getDouble(cursor.getColumnIndexOrThrow("bearing")));
                 obj.put("altitude", cursor.getDouble(cursor.getColumnIndexOrThrow("altitude")));
                 obj.put("timestamp", cursor.getLong(cursor.getColumnIndexOrThrow("timestamp")));
+                obj.put("mockLocationStatus", cursor.getString(cursor.getColumnIndexOrThrow("mockLocationStatus")));
                 arr.put(obj);
             }
             cursor.close();
@@ -166,17 +190,26 @@ public class LocationBuffer extends SQLiteOpenHelper {
     public void clearAll() {
         try {
             SQLiteDatabase db = getWritableDatabase();
-            db.delete(TABLE, null, null);
+            db.delete(TABLE, OWNER_FILTER, owner());
         } catch (Exception e) {
             Logger.error("Failed to clear all locations", e);
         }
+    }
+
+    private String[] owner() {
+        android.content.SharedPreferences prefs = context.getSharedPreferences("bg_geo_prefs", Context.MODE_PRIVATE);
+        java.util.Map<String, ?> snapshot = prefs.getAll();
+        return new String[] {
+            snapshot.get("headless_tenant_id") instanceof String ? (String) snapshot.get("headless_tenant_id") : "",
+            snapshot.get("headless_employee_id") instanceof String ? (String) snapshot.get("headless_employee_id") : ""
+        };
     }
 
     public int getUnsyncedCount() {
         int count = 0;
         try {
             SQLiteDatabase db = getReadableDatabase();
-            Cursor cursor = db.rawQuery("SELECT COUNT(*) FROM " + TABLE + " WHERE synced = 0", null);
+            Cursor cursor = db.rawQuery("SELECT COUNT(*) FROM " + TABLE + " WHERE synced = 0 AND " + OWNER_FILTER, owner());
             if (cursor.moveToFirst()) {
                 count = cursor.getInt(0);
             }

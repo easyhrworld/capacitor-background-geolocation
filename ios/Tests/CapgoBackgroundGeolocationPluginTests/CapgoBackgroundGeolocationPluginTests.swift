@@ -1,5 +1,6 @@
 import XCTest
 import CoreLocation
+import Capacitor
 @testable import CapgoBackgroundGeolocationPlugin
 
 // swiftlint:disable:next type_body_length
@@ -39,6 +40,14 @@ class CapgoBackgroundGeolocationTests: XCTestCase {
         XCTAssertTrue(methodNames.contains("stop"))
         XCTAssertTrue(methodNames.contains("openSettings"))
         XCTAssertTrue(methodNames.contains("setPlannedRoute"))
+        XCTAssertTrue(methodNames.contains("setupGeofencing"))
+        XCTAssertTrue(methodNames.contains("addGeofence"))
+        XCTAssertTrue(methodNames.contains("removeGeofence"))
+        XCTAssertTrue(methodNames.contains("removeAllGeofences"))
+        XCTAssertTrue(methodNames.contains("getMonitoredGeofences"))
+        let updateHeadersMethod = plugin.pluginMethods.first { $0.name == "updateHeaders" }
+        XCTAssertNotNil(updateHeadersMethod, "updateHeaders should be registered in pluginMethods")
+        XCTAssertEqual(updateHeadersMethod?.returnType, CAPPluginReturnPromise)
         XCTAssertTrue(methodNames.contains("getPluginVersion"))
     }
 

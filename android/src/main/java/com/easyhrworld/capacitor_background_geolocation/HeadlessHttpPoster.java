@@ -21,18 +21,21 @@ public class HeadlessHttpPoster {
 
     public void postBatch(LocationBuffer locationBuffer) {
         SharedPreferences prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-        String serverUrl = prefs.getString("headless_server_url", "");
-        String authToken = prefs.getString("headless_auth_token", "");
-        String employeeId = prefs.getString("headless_employee_id", "");
-        String tenantId = prefs.getString("headless_tenant_id", "");
-        int batchSize = prefs.getInt("headless_batch_size", 20);
+        java.util.Map<String, ?> snapshot = prefs.getAll();
+        String serverUrl = (String) snapshot.get("headless_server_url");
+        String authToken = (String) snapshot.get("headless_auth_token");
+        String employeeId = (String) snapshot.get("headless_employee_id");
+        String tenantId = (String) snapshot.get("headless_tenant_id");
+        int batchSize = snapshot.get("headless_batch_size") instanceof Integer ? (Integer) snapshot.get("headless_batch_size") : 20;
 
-        if (serverUrl.isEmpty() || authToken.isEmpty()) {
+        if (
+            serverUrl == null || serverUrl.isEmpty() || authToken == null || authToken.isEmpty() || employeeId == null || tenantId == null
+        ) {
             Logger.debug("Headless posting not configured, skipping");
             return;
         }
 
-        JSONArray batch = locationBuffer.getUnsyncedBatchAsJson(batchSize);
+        JSONArray batch = locationBuffer.getUnsyncedBatchAsJson(batchSize, new String[] { tenantId, employeeId });
         if (batch.length() == 0) {
             return;
         }
@@ -55,6 +58,7 @@ public class HeadlessHttpPoster {
                 loc.put("bearing", src.getDouble("bearing"));
                 loc.put("altitude", src.getDouble("altitude"));
                 loc.put("timestamp", src.getLong("timestamp"));
+                loc.put("mockLocationStatus", src.optString("mockLocationStatus", "unknown"));
                 locations.put(loc);
             }
             payload.put("locations", locations);

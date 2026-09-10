@@ -10,12 +10,14 @@ class HeadlessHttpPoster {
     /// Reads configuration from UserDefaults.
     func postBatch(_ locationBuffer: LocationBuffer) {
         let defaults = UserDefaults.standard
+        objc_sync_enter(defaults)
         let serverUrl = defaults.string(forKey: "\(Self.prefsPrefix)server_url") ?? ""
         let authToken = defaults.string(forKey: "\(Self.prefsPrefix)auth_token") ?? ""
         let employeeId = defaults.string(forKey: "\(Self.prefsPrefix)employee_id") ?? ""
         let tenantId = defaults.string(forKey: "\(Self.prefsPrefix)tenant_id") ?? ""
         let batchSize = defaults.integer(forKey: "\(Self.prefsPrefix)batch_size")
         let effectiveBatchSize = batchSize > 0 ? batchSize : 20
+        objc_sync_exit(defaults)
 
         guard !serverUrl.isEmpty, !authToken.isEmpty else {
             NSLog("[BackgroundGeolocation] Headless posting not configured, skipping")
@@ -27,7 +29,7 @@ class HeadlessHttpPoster {
             return
         }
 
-        let batch = locationBuffer.getUnsyncedBatch(effectiveBatchSize)
+        let batch = locationBuffer.getUnsyncedBatch(effectiveBatchSize, ownerTenant: tenantId, ownerEmployee: employeeId)
         guard !batch.isEmpty else { return }
 
         // Build payload matching Android format
@@ -46,6 +48,7 @@ class HeadlessHttpPoster {
             loc["bearing"] = row["bearing"]
             loc["altitude"] = row["altitude"]
             loc["timestamp"] = row["timestamp"]
+            loc["mockLocationStatus"] = row["mockLocationStatus"] ?? "unknown"
             locations.append(loc)
         }
 

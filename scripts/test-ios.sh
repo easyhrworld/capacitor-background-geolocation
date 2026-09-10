@@ -11,4 +11,4 @@ if [[ -z "${SIMULATOR_ID:-}" ]]; then
   exit 1
 fi
 
-xcodebuild test -scheme CapgoBackgroundGeolocation -destination "id=${SIMULATOR_ID}" "$@"
+xcodebuild test -scheme EasyhrworldCapacitorBackgroundGeolocation -destination "id=${SIMULATOR_ID}" "$@"

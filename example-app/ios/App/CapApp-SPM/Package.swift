@@ -11,9 +11,11 @@ let package = Package(
             targets: ["CapApp-SPM"])
     ],
     dependencies: [
-        .package(url: "https://github.com/ionic-team/capacitor-swift-pm.git", from: "8.0.0"),
-        .package(name: "CapgoBackgroundGeolocation", path: "../../../node_modules/.bun/@capgo+background-geolocation@file+../node_modules/@capgo/background-geolocation"),
-        .package(name: "CapacitorLocalNotifications", path: "../../../node_modules/.bun/@capacitor+local-notifications@7.0.4+15e98482558ccfe6/node_modules/@capacitor/local-notifications")
+        .package(url: "https://github.com/ionic-team/capacitor-swift-pm.git", exact: "8.3.1"),
+        .package(name: "EasyhrworldCapacitorBackgroundGeolocation", path: "../../../node_modules/.bun/@easyhrworld+capacitor-background-geolocation@file+../node_modules/@easyhrworld/capacitor-background-geolocation"),
+        .package(name: "CapacitorLocalNotifications", path: "../../../node_modules/.bun/@capacitor+local-notifications@7.0.7+2a604cb248d57ff2/node_modules/@capacitor/local-notifications"),
+        .package(name: "CapgoCapacitorUpdater", path: "../../../node_modules/.bun/@capgo+capacitor-updater@8.47.10+2a604cb248d57ff2/node_modules/@capgo/capacitor-updater"),
+        .package(name: "CapacitorSplashScreen", path: "../../../node_modules/.bun/@capacitor+splash-screen@8.0.1+2a604cb248d57ff2/node_modules/@capacitor/splash-screen")
     ],
     targets: [
         .target(
@@ -21,8 +23,10 @@ let package = Package(
             dependencies: [
                 .product(name: "Capacitor", package: "capacitor-swift-pm"),
                 .product(name: "Cordova", package: "capacitor-swift-pm"),
-                .product(name: "CapgoBackgroundGeolocation", package: "CapgoBackgroundGeolocation"),
-                .product(name: "CapacitorLocalNotifications", package: "CapacitorLocalNotifications")
+                .product(name: "EasyhrworldCapacitorBackgroundGeolocation", package: "EasyhrworldCapacitorBackgroundGeolocation"),
+                .product(name: "CapacitorLocalNotifications", package: "CapacitorLocalNotifications"),
+                .product(name: "CapgoCapacitorUpdater", package: "CapgoCapacitorUpdater"),
+                .product(name: "CapacitorSplashScreen", package: "CapacitorSplashScreen")
             ]
         )
     ]
