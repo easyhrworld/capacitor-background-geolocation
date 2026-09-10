@@ -457,6 +457,13 @@ public class BackgroundGeolocation extends Plugin {
 
     @PluginMethod
     public void configure(PluginCall call) {
+        // Migrate legacy rows under the previous owner before changing configuration.
+        try (LocationBuffer buffer = new LocationBuffer(getContext())) {
+            buffer.getWritableDatabase();
+        } catch (Exception error) {
+            call.reject("Could not prepare the location buffer", "BUFFER_ERROR", error);
+            return;
+        }
         String serverUrl = call.getString("serverUrl", "");
         String authToken = call.getString("authToken", "");
         String employeeId = call.getString("employeeId", "");
