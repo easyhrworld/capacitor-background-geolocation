@@ -8,6 +8,7 @@ class LocationBuffer {
 
     private static let dbName = "bg_geo_locations.db"
     private static let tableName = "buffered_locations"
+    private static let schemaVersion: Int32 = 2
     private var db: OpaquePointer?
     private let defaults: UserDefaults
 
@@ -37,6 +38,32 @@ class LocationBuffer {
     }
 
     private func createTableIfNeeded() {
+        do {
+            try executeChecked("BEGIN IMMEDIATE")
+            var committed = false
+            defer {
+                if !committed { execute("ROLLBACK") }
+            }
+
+            let versionStatement = try prepare("PRAGMA user_version")
+            defer { sqlite3_finalize(versionStatement) }
+            guard sqlite3_step(versionStatement) == SQLITE_ROW else { throw databaseError() }
+            let version = sqlite3_column_int(versionStatement, 0)
+            guard sqlite3_step(versionStatement) == SQLITE_DONE else { throw databaseError() }
+
+            if version < Self.schemaVersion {
+                try migrateSchema()
+                try executeChecked("PRAGMA user_version = \(Self.schemaVersion)")
+            }
+
+            try executeChecked("COMMIT")
+            committed = true
+        } catch {
+            print("[BackgroundGeolocation] Failed to migrate location buffer: \(error.localizedDescription)")
+        }
+    }
+
+    private func migrateSchema() throws {
         let sql = """
         CREATE TABLE IF NOT EXISTS \(LocationBuffer.tableName) (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -50,29 +77,33 @@ class LocationBuffer {
             synced INTEGER DEFAULT 0
         )
         """
-        execute(sql)
-        // Upgrade in place. Previously buffered fixes have no OS evidence.
-        var stmt: OpaquePointer?
+        try executeChecked(sql)
+        // Inspect each column separately to recover upgrades interrupted by older versions.
+        let stmt = try prepare("PRAGMA table_info(buffered_locations)")
+        defer { sqlite3_finalize(stmt) }
         var columns = Set<String>()
-        if sqlite3_prepare_v2(db, "PRAGMA table_info(buffered_locations)", -1, &stmt, nil) == SQLITE_OK {
-            while sqlite3_step(stmt) == SQLITE_ROW {
-                columns.insert(String(cString: sqlite3_column_text(stmt, 1)))
-            }
+        var result = sqlite3_step(stmt)
+        while result == SQLITE_ROW {
+            columns.insert(String(cString: sqlite3_column_text(stmt, 1)))
+            result = sqlite3_step(stmt)
         }
-        sqlite3_finalize(stmt)
+        guard result == SQLITE_DONE else { throw databaseError() }
         if !columns.contains("mockLocationStatus") {
-            execute("ALTER TABLE buffered_locations ADD COLUMN mockLocationStatus TEXT NOT NULL DEFAULT 'unknown'")
+            try executeChecked("ALTER TABLE buffered_locations ADD COLUMN mockLocationStatus TEXT NOT NULL DEFAULT 'unknown'")
         }
         if !columns.contains("ownerTenant") {
-            execute("ALTER TABLE buffered_locations ADD COLUMN ownerTenant TEXT NOT NULL DEFAULT ''")
-            execute("ALTER TABLE buffered_locations ADD COLUMN ownerEmployee TEXT NOT NULL DEFAULT ''")
-            var migration: OpaquePointer?
-            if sqlite3_prepare_v2(db, "UPDATE buffered_locations SET ownerTenant = ?, ownerEmployee = ?", -1, &migration, nil) == SQLITE_OK {
-                bindOwner(migration)
-                sqlite3_step(migration)
-            }
-            sqlite3_finalize(migration)
+            try executeChecked("ALTER TABLE buffered_locations ADD COLUMN ownerTenant TEXT NOT NULL DEFAULT ''")
         }
+        if !columns.contains("ownerEmployee") {
+            try executeChecked("ALTER TABLE buffered_locations ADD COLUMN ownerEmployee TEXT NOT NULL DEFAULT ''")
+        }
+
+        // Backfill once, including when both columns were added but the old upgrade stopped
+        // before assigning ownership. Never overwrite another employee's existing records.
+        let migration = try prepare("UPDATE buffered_locations SET ownerTenant = ?, ownerEmployee = ? WHERE ownerTenant = '' AND ownerEmployee = ''")
+        defer { sqlite3_finalize(migration) }
+        guard bindOwner(migration) == SQLITE_OK,
+              sqlite3_step(migration) == SQLITE_DONE else { throw databaseError() }
     }
 
     // MARK: - Insert
@@ -219,12 +250,31 @@ class LocationBuffer {
 
     // MARK: - Helpers
 
-    private func bindOwner(_ stmt: OpaquePointer?, startingAt index: Int32 = 1, tenant: String? = nil, employee: String? = nil) {
+    @discardableResult
+    private func bindOwner(_ stmt: OpaquePointer?, startingAt index: Int32 = 1, tenant: String? = nil, employee: String? = nil) -> Int32 {
         objc_sync_enter(defaults)
         defer { objc_sync_exit(defaults) }
         let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
-        sqlite3_bind_text(stmt, index, tenant ?? defaults.string(forKey: "bg_geo_tenant_id") ?? "", -1, transient)
-        sqlite3_bind_text(stmt, index + 1, employee ?? defaults.string(forKey: "bg_geo_employee_id") ?? "", -1, transient)
+        let result = sqlite3_bind_text(stmt, index, tenant ?? defaults.string(forKey: "bg_geo_tenant_id") ?? "", -1, transient)
+        guard result == SQLITE_OK else { return result }
+        return sqlite3_bind_text(stmt, index + 1, employee ?? defaults.string(forKey: "bg_geo_employee_id") ?? "", -1, transient)
+    }
+
+    private func databaseError() -> NSError {
+        NSError(domain: "LocationBuffer", code: Int(sqlite3_errcode(db)),
+                userInfo: [NSLocalizedDescriptionKey: String(cString: sqlite3_errmsg(db))])
+    }
+
+    private func prepare(_ sql: String) throws -> OpaquePointer {
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK, let stmt = stmt else {
+            throw databaseError()
+        }
+        return stmt
+    }
+
+    private func executeChecked(_ sql: String) throws {
+        guard sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK else { throw databaseError() }
     }
 
     private func execute(_ sql: String) {
